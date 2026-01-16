@@ -298,7 +298,7 @@ trainer = Seq2SeqTrainer(
     eval_dataset=val_dataset,
     processing_class=processor,
     compute_metrics=compute_metrics,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=5), generation_callback]
 )
 
 if __name__ == "__main__":

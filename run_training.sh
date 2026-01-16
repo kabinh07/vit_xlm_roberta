@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set environment variables for optimal GPU training
-export CUDA_VISIBLE_DEVICES="0,1,3"
+# export CUDA_VISIBLE_DEVICES="0,1,3"
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 export OMP_NUM_THREADS=1
