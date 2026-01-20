@@ -1,8 +1,7 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import os
-import torch.distributed as dist
 import jiwer
 from PIL import Image
 
@@ -48,7 +47,7 @@ gen_config = GenerationConfig.from_model_config(model.config)
 gen_config.repetition_penalty = 1.1
 model.generation_config = gen_config
 
-DATA_DIR = "/mnt/truenas/datasets/synth/400K/"
+DATA_DIR = "/workspace/data/nid_ocr_synth_data_100k"
 
 class OCRDataset(Dataset):
     def __init__(self, data_dir, processor, max_target_length=32, small_dataset_size=None):
@@ -136,17 +135,17 @@ def compute_metrics(pred):
 #     if not param.requires_grad:
 #         print(name)
 
-for name, param in model.encoder.named_parameters(): 
-    param.requires_grad = False
+# for name, param in model.encoder.named_parameters(): 
+#     param.requires_grad = False
 
-for name, param in model.encoder.pooler.named_parameters(): 
-    param.requires_grad = True
+# for name, param in model.encoder.pooler.named_parameters(): 
+#     param.requires_grad = True
 
-for name, param in model.encoder.layernorm.named_parameters(): 
-    param.requires_grad = True
+# for name, param in model.encoder.layernorm.named_parameters(): 
+#     param.requires_grad = True
 
-for param in model.encoder.encoder.layer[-5].parameters():
-    param.requires_grad = True
+# for param in model.encoder.encoder.layer[-5].parameters():
+#     param.requires_grad = True
 
 
 print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1000000:.2f} million")
@@ -242,17 +241,17 @@ class GenerationCallback(TrainerCallback):
             df.to_csv(csv_path, mode="w", index=False)
 
 eval_images = [
-    '/mnt/truenas/datasets/synth/400K/bangla/images/bn_247201.png',
-    '/mnt/truenas/datasets/synth/400K/bangla/images/bn_247202.png',
-    '/mnt/truenas/datasets/synth/400K/english/images/en_178613.png',
-    '/mnt/truenas/datasets/synth/400K/english/images/en_178614.png'
+    f'{DATA_DIR}/bangla/images/bn_247201.png',
+    f'{DATA_DIR}/bangla/images/bn_247202.png',
+    f'{DATA_DIR}/english/images/en_178613.png',
+    f'{DATA_DIR}/english/images/en_178614.png'
 ]
 
 eval_texts = [
-    '/mnt/truenas/datasets/synth/400K/bangla/labels/bn_247201.txt',
-    '/mnt/truenas/datasets/synth/400K/bangla/labels/bn_247202.txt',
-    '/mnt/truenas/datasets/synth/400K/english/labels/en_178613.txt',
-    '/mnt/truenas/datasets/synth/400K/english/labels/en_178614.txt'
+    f'{DATA_DIR}/bangla/labels/bn_247201.txt',
+    f'{DATA_DIR}/bangla/labels/bn_247202.txt',
+    f'{DATA_DIR}/english/labels/en_178613.txt',
+    f'{DATA_DIR}/english/labels/en_178614.txt'
 ]
 
 generation_callback = GenerationCallback(
@@ -266,8 +265,8 @@ generation_callback = GenerationCallback(
 
 training_args = Seq2SeqTrainingArguments(
     output_dir="./outputs",
-    per_device_train_batch_size=2,
-    per_device_eval_batch_size=32,
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=64,
     num_train_epochs=1000,
     fp16=torch.cuda.is_available(),
     save_steps=1000,
@@ -286,9 +285,9 @@ training_args = Seq2SeqTrainingArguments(
     eval_strategy="steps", 
     weight_decay=0.005,
     eval_on_start=True,
-    ddp_find_unused_parameters=True,
-    ddp_backend="gloo",
-    local_rank=-1,
+    # ddp_find_unused_parameters=True,
+    # ddp_backend="gloo",
+    # local_rank=-1,
 )
 
 trainer = Seq2SeqTrainer(
@@ -303,6 +302,6 @@ trainer = Seq2SeqTrainer(
 
 if __name__ == "__main__":
     try:
-        trainer.train(resume_from_checkpoint=True)
+        trainer.train()
     except Exception as e:
         print(f"Training interrupted: {e}")
