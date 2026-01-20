@@ -7,15 +7,12 @@ from PIL import Image
 
 import torch
 from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
 from torch.utils.data import random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from transformers import Seq2SeqTrainer
 from transformers import Seq2SeqTrainingArguments
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel, XLMRobertaTokenizerFast, XLMRobertaForCausalLM, XLMRobertaForCausalLM
-from transformers import AutoConfig, AutoModelForCausalLM, ViTImageProcessor, AutoTokenizer, ProcessorMixin, DataCollatorForSeq2Seq
-from transformers import GenerationConfig
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel, XLMRobertaForCausalLM, AutoTokenizer, GenerationConfig
 from transformers import EarlyStoppingCallback, TrainerCallback
 
 import random
