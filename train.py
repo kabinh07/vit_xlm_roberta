@@ -15,6 +15,41 @@ from transformers import Seq2SeqTrainingArguments
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel, XLMRobertaForCausalLM, AutoTokenizer, GenerationConfig
 from transformers import EarlyStoppingCallback, TrainerCallback
 
+import torch.nn as nn
+
+
+class LabelSmoothingSeq2SeqTrainer(Seq2SeqTrainer):
+    """Custom trainer that handles label smoothing for VisionEncoderDecoderModel."""
+    
+    def __init__(self, label_smoothing_factor=0.0, **kwargs):
+        # Set label_smoothing_factor to 0 in args to prevent default behavior
+        if kwargs.get('args') is not None:
+            self._custom_label_smoothing = kwargs['args'].label_smoothing_factor
+            kwargs['args'].label_smoothing_factor = 0.0
+        else:
+            self._custom_label_smoothing = label_smoothing_factor
+        super().__init__(**kwargs)
+    
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        
+        if labels is not None and self._custom_label_smoothing > 0:
+            # Compute label smoothing loss manually
+            loss_fct = nn.CrossEntropyLoss(
+                ignore_index=-100,
+                label_smoothing=self._custom_label_smoothing
+            )
+            # Shift logits and labels for causal LM
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        else:
+            loss = outputs.loss
+        
+        return (loss, outputs) if return_outputs else loss
+
 from safetensors.torch import load_file
 
 import random
@@ -302,12 +337,17 @@ training_args = Seq2SeqTrainingArguments(
     metric_for_best_model="cer",
     greater_is_better=False,
     label_smoothing_factor=0.1,
+    dataloader_num_workers=12,
+    dataloader_persistent_workers=True,
+    gradient_checkpointing=True,
+    dataloader_prefetch_factor=4,
+    dataloader_pin_memory=True,
     # ddp_find_unused_parameters=True,
     # ddp_backend="gloo",
     # local_rank=-1,
 )
 
-trainer = Seq2SeqTrainer(
+trainer = LabelSmoothingSeq2SeqTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
