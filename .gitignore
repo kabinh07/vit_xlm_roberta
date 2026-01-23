@@ -1,6 +1,10 @@
 .venv
 outputs/*
 runs/*
+outputs-p1/*
+runs-p1/*
+outputs-p2/*
+runs-p2/*
 *.log
 *.tmp
 .DS_Store
@@ -14,3 +18,4 @@ __pycache__/
 *.csv
 *.xlsx
 *.db
+*.zip

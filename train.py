@@ -15,6 +15,8 @@ from transformers import Seq2SeqTrainingArguments
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel, XLMRobertaForCausalLM, AutoTokenizer, GenerationConfig
 from transformers import EarlyStoppingCallback, TrainerCallback
 
+from safetensors.torch import load_file
+
 import random
 
 import unicodedata
@@ -26,10 +28,11 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Load model and processor
 model_dir = "microsoft/trocr-base-stage1"
 decoder_dir = "FacebookAI/xlm-roberta-base"
+ckpt_path = "/workspace/github/vit_xlm_roberta/outputs-p2/checkpoint-20000"
 
 tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
-model = VisionEncoderDecoderModel.from_pretrained(model_dir)
+model = VisionEncoderDecoderModel.from_pretrained(ckpt_path)
 decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
 
 # Configure decoder
@@ -39,9 +42,23 @@ model.config.vocab_size = model.decoder.config.vocab_size
 model.config.decoder_start_token_id = tokenizer.bos_token_id
 model.config.pad_token_id = tokenizer.pad_token_id
 model.config.eos_token_id = tokenizer.eos_token_id
+model.config.decoder = model.decoder.config
+
+state_dict = load_file(f"{ckpt_path}/model.safetensors")
+missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+print(f"Missing keys: {missing}")
+print(f"Unexpected keys: {unexpected}")
 
 gen_config = GenerationConfig.from_model_config(model.config)
 gen_config.repetition_penalty = 1.1
+gen_config.max_length = 32
+gen_config.early_stopping = True
+gen_config.no_repeat_ngram_size = 3
+gen_config.num_beams = 5
+gen_config.length_penalty = 1.0
+gen_config.use_cache = True
+
 model.generation_config = gen_config
 
 DATA_DIR = "/workspace/data/nid_ocr_synth_data_100k"
@@ -264,7 +281,7 @@ training_args = Seq2SeqTrainingArguments(
     output_dir="./outputs",
     per_device_train_batch_size=32,
     per_device_eval_batch_size=64,
-    num_train_epochs=1000,
+    num_train_epochs=10,
     fp16=torch.cuda.is_available(),
     save_steps=1000,
     logging_steps=100,
@@ -275,13 +292,16 @@ training_args = Seq2SeqTrainingArguments(
     push_to_hub=False,
     predict_with_generate=True,
     gradient_accumulation_steps=2,
-    learning_rate=2e-5,
+    learning_rate=1e-05,
     lr_scheduler_type="cosine",
     warmup_steps=100,
     load_best_model_at_end=True,
     eval_strategy="steps", 
     weight_decay=0.005,
     eval_on_start=True,
+    metric_for_best_model="cer",
+    greater_is_better=False,
+    label_smoothing_factor=0.1,
     # ddp_find_unused_parameters=True,
     # ddp_backend="gloo",
     # local_rank=-1,
@@ -294,7 +314,7 @@ trainer = Seq2SeqTrainer(
     eval_dataset=val_dataset,
     processing_class=processor,
     compute_metrics=compute_metrics,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=5), generation_callback]
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
 )
 
 if __name__ == "__main__":
