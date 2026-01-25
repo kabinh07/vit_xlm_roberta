@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3"
 
 import os
 import jiwer
@@ -68,22 +68,25 @@ ckpt_path = "/workspace/github/vit_xlm_roberta/outputs-p2/checkpoint-20000"
 tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
 model = VisionEncoderDecoderModel.from_pretrained(ckpt_path)
-decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
+# decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
+
+model.decoder.config.is_decoder = True
+model.decoder.config.add_cross_attention = True
 
 # Configure decoder
-model.decoder = decoder
-model.decoder.config = decoder.config
-model.config.vocab_size = model.decoder.config.vocab_size
-model.config.decoder_start_token_id = tokenizer.bos_token_id
-model.config.pad_token_id = tokenizer.pad_token_id
-model.config.eos_token_id = tokenizer.eos_token_id
-model.config.decoder = model.decoder.config
+# model.decoder = decoder
+# model.decoder.config = decoder.config
+# model.config.vocab_size = model.decoder.config.vocab_size
+# model.config.decoder_start_token_id = tokenizer.bos_token_id
+# model.config.pad_token_id = tokenizer.pad_token_id
+# model.config.eos_token_id = tokenizer.eos_token_id
+# model.config.decoder = model.decoder.config
 
-state_dict = load_file(f"{ckpt_path}/model.safetensors")
-missing, unexpected = model.load_state_dict(state_dict, strict=False)
+# state_dict = load_file(f"{ckpt_path}/model.safetensors")
+# missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
-print(f"Missing keys: {missing}")
-print(f"Unexpected keys: {unexpected}")
+# print(f"Missing keys: {missing}")
+# print(f"Unexpected keys: {unexpected}")
 
 gen_config = GenerationConfig.from_model_config(model.config)
 gen_config.repetition_penalty = 1.1
@@ -96,45 +99,37 @@ gen_config.use_cache = True
 
 model.generation_config = gen_config
 
-DATA_DIR = "/workspace/data/nid_ocr_synth_data_100k"
+DATA_DIR = "/workspace/data/nid_data_synth"
 
 class OCRDataset(Dataset):
     def __init__(self, data_dir, processor, max_target_length=32, small_dataset_size=None):
-        self.bn_image_dir = os.path.join(data_dir, "bangla/images")
-        self.en_image_dir = os.path.join(data_dir, "english/images")
-        self.bn_images = os.listdir(self.bn_image_dir)
-        self.en_images = os.listdir(self.en_image_dir)
-        self.images = self.__get_total_images()
-        self.bn_label_dir = os.path.join(data_dir, "bangla/labels")
-        self.en_label_dir = os.path.join(data_dir, "english/labels")
+        self.image_dir = os.path.join(data_dir, "images")
+        self.images = os.listdir(self.image_dir)
+        self.label_dir = os.path.join(data_dir, "labels")
         self.processor = processor
         self.tokenizer = processor.tokenizer
         self.max_target_length = max_target_length
 
-    def __get_total_images(self):
-        images = []
-        self.en_images = [image for image in self.en_images if image.strip() != ""]
-        self.bn_images = [image for image in self.bn_images if image.strip() != ""]
-        print(f"Total english images: {len(self.en_images)} and bangla images: {len(self.bn_images)}")
-        for en, bn in zip(self.en_images, self.bn_images): 
-            images.extend([bn, en])
-        return images
+    # def __get_total_images(self):
+    #     images = []
+    #     self.en_images = [image for image in self.en_images if image.strip() != ""]
+    #     self.bn_images = [image for image in self.bn_images if image.strip() != ""]
+    #     print(f"Total english images: {len(self.en_images)} and bangla images: {len(self.bn_images)}")
+    #     for en, bn in zip(self.en_images, self.bn_images): 
+    #         images.extend([bn, en])
+    #     return images
         
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        if idx % 2 == 0:
-            image_path = os.path.join(self.bn_image_dir, self.images[idx])
-            label_path = os.path.join(self.bn_label_dir, self.images[idx].split(".")[0]+".txt")
-        else:
-            image_path = os.path.join(self.en_image_dir, self.images[idx])
-            label_path = os.path.join(self.en_label_dir, self.images[idx].split(".")[0]+".txt")
+        image_path = os.path.join(self.image_dir, self.images[idx])
+        label_path = os.path.join(self.label_dir, self.images[idx].split(".")[0]+".txt")
+        
         image = Image.open(image_path).convert("RGB")
         with open(label_path, "r", encoding="utf-8") as f:
             text = f.read()
-        if idx % 2 == 0:
-            text = unicodedata.normalize("NFC", text)
+        text = unicodedata.normalize("NFC", text)
         pixel_values = self.processor(image, return_tensors="pt")["pixel_values"]
         tokenized = self.processor.tokenizer(
             text, 
@@ -184,8 +179,11 @@ def compute_metrics(pred):
 #     if not param.requires_grad:
 #         print(name)
 
-# for name, param in model.encoder.named_parameters(): 
-#     param.requires_grad = False
+for name, param in model.decoder.named_parameters(): 
+    param.requires_grad = False
+
+for name, param in model.decoder.embeddings.named_parameters():
+    param.requires_grad = True
 
 # for name, param in model.encoder.pooler.named_parameters(): 
 #     param.requires_grad = True
@@ -290,17 +288,17 @@ class GenerationCallback(TrainerCallback):
             df.to_csv(csv_path, mode="w", index=False)
 
 eval_images = [
-    f'{DATA_DIR}/bangla/images/bn_247201.png',
-    f'{DATA_DIR}/bangla/images/bn_247202.png',
-    f'{DATA_DIR}/english/images/en_178613.png',
-    f'{DATA_DIR}/english/images/en_178614.png'
+    f'{DATA_DIR}/images/bn_img_4383.png',
+    f'{DATA_DIR}/images/bn_img_4856.png',
+    f'{DATA_DIR}/images/en_img_11559.png',
+    f'{DATA_DIR}/images/en_img_14207.png'
 ]
 
 eval_texts = [
-    f'{DATA_DIR}/bangla/labels/bn_247201.txt',
-    f'{DATA_DIR}/bangla/labels/bn_247202.txt',
-    f'{DATA_DIR}/english/labels/en_178613.txt',
-    f'{DATA_DIR}/english/labels/en_178614.txt'
+    f'{DATA_DIR}/labels/bn_img_4383.txt',
+    f'{DATA_DIR}/labels/bn_img_4856.txt',
+    f'{DATA_DIR}/labels/en_img_11559.txt',
+    f'{DATA_DIR}/labels/en_img_14207.txt'
 ]
 
 generation_callback = GenerationCallback(
@@ -337,7 +335,7 @@ training_args = Seq2SeqTrainingArguments(
     metric_for_best_model="cer",
     greater_is_better=False,
     label_smoothing_factor=0.1,
-    dataloader_num_workers=12,
+    dataloader_num_workers=4,
     dataloader_persistent_workers=True,
     gradient_checkpointing=True,
     dataloader_prefetch_factor=4,

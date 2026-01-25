@@ -1,3 +1,3 @@
 #!/bin/bash
 
-nohup python3 train.py > train.log 2>&1 &
+nohup torchrun --nproc_per_node=3 train.py > train.log 2>&1 &
