@@ -63,17 +63,18 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Load model and processor
 model_dir = "microsoft/trocr-base-stage1"
 decoder_dir = "FacebookAI/xlm-roberta-base"
-ckpt_path = "/workspace/github/vit_xlm_roberta/outputs-p2/checkpoint-20000"
+ckpt_path = os.path.abspath("/mnt/data/github/vit_xlm_roberta/outputs-p2/checkpoint-20000")
 
 tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
-model = VisionEncoderDecoderModel.from_pretrained(ckpt_path)
+model = VisionEncoderDecoderModel.from_pretrained(ckpt_path, local_files_only=True)
+# model = VisionEncoderDecoderModel.from_pretrained(model_dir)
 # decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
 
 model.decoder.config.is_decoder = True
 model.decoder.config.add_cross_attention = True
 
-# Configure decoder
+# # Configure decoder
 # model.decoder = decoder
 # model.decoder.config = decoder.config
 # model.config.vocab_size = model.decoder.config.vocab_size
@@ -99,7 +100,7 @@ gen_config.use_cache = True
 
 model.generation_config = gen_config
 
-DATA_DIR = "/workspace/data/nid_data_synth"
+DATA_DIR = "/mnt/truenas/datasets/synth/nid_data_synth"
 
 class OCRDataset(Dataset):
     def __init__(self, data_dir, processor, max_target_length=32, small_dataset_size=None):
@@ -152,7 +153,7 @@ data = OCRDataset(DATA_DIR, processor)
 
 print(f"Sample of dataset:\n{data[0]}")
 
-train_size = int(0.999 * len(data))
+train_size = int(0.99 * len(data))
 val_size = len(data) - train_size
 
 train_dataset, val_dataset = random_split(data, [train_size, val_size])
@@ -175,14 +176,13 @@ def compute_metrics(pred):
 
     return {"cer": cer, "wer": wer}
 
-# for name, param in model.encoder.named_parameters(): 
-#     if not param.requires_grad:
-#         print(name)
+# for name, param in model.decoder.named_parameters(): 
+#     print(name, param)
 
 for name, param in model.decoder.named_parameters(): 
     param.requires_grad = False
 
-for name, param in model.decoder.embeddings.named_parameters():
+for name, param in model.decoder.roberta.embeddings.named_parameters():
     param.requires_grad = True
 
 # for name, param in model.encoder.pooler.named_parameters(): 
@@ -312,10 +312,10 @@ generation_callback = GenerationCallback(
 
 training_args = Seq2SeqTrainingArguments(
     output_dir="./outputs",
-    per_device_train_batch_size=32,
-    per_device_eval_batch_size=64,
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=16,
     num_train_epochs=10,
-    fp16=torch.cuda.is_available(),
+    fp16=False,
     save_steps=1000,
     logging_steps=100,
     eval_steps=1000,
@@ -324,7 +324,7 @@ training_args = Seq2SeqTrainingArguments(
     save_total_limit=2,
     push_to_hub=False,
     predict_with_generate=True,
-    gradient_accumulation_steps=2,
+    gradient_accumulation_steps=4,
     learning_rate=1e-05,
     lr_scheduler_type="cosine",
     warmup_steps=100,
@@ -335,14 +335,9 @@ training_args = Seq2SeqTrainingArguments(
     metric_for_best_model="cer",
     greater_is_better=False,
     label_smoothing_factor=0.1,
-    dataloader_num_workers=4,
-    dataloader_persistent_workers=True,
-    gradient_checkpointing=True,
-    dataloader_prefetch_factor=4,
-    dataloader_pin_memory=True,
-    # ddp_find_unused_parameters=True,
-    # ddp_backend="gloo",
-    # local_rank=-1,
+    ddp_find_unused_parameters=True,
+    ddp_backend="gloo",
+    local_rank=-1,
 )
 
 trainer = LabelSmoothingSeq2SeqTrainer(
