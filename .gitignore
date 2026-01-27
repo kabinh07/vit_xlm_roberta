@@ -1,5 +1,5 @@
 .venv
-outputs/*
+outputs*/*
 runs/*
 *.log
 *.tmp
@@ -14,3 +14,4 @@ __pycache__/
 *.csv
 *.xlsx
 *.db
+*.zip
