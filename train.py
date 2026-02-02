@@ -130,7 +130,7 @@ class OCRDataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         with open(label_path, "r", encoding="utf-8") as f:
             text = f.read()
-        text = unicodedata.normalize("NFC", text)
+        text = unicodedata.normalize("NFKC", text)
         pixel_values = self.processor(image, return_tensors="pt")["pixel_values"]
         tokenized = self.processor.tokenizer(
             text, 
@@ -179,11 +179,11 @@ def compute_metrics(pred):
 # for name, param in model.decoder.named_parameters(): 
 #     print(name, param)
 
-for name, param in model.decoder.named_parameters(): 
-    param.requires_grad = False
+# for name, param in model.decoder.named_parameters(): 
+#     param.requires_grad = False
 
-for name, param in model.decoder.roberta.embeddings.named_parameters():
-    param.requires_grad = True
+# for name, param in model.decoder.roberta.embeddings.named_parameters():
+#     param.requires_grad = True
 
 # for name, param in model.encoder.pooler.named_parameters(): 
 #     param.requires_grad = True
@@ -310,48 +310,85 @@ generation_callback = GenerationCallback(
     output_dir="./runs"
 )
 
-training_args = Seq2SeqTrainingArguments(
-    output_dir="./outputs",
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=16,
-    num_train_epochs=10,
-    fp16=False,
-    save_steps=1000,
-    logging_steps=100,
-    eval_steps=1000,
-    report_to="tensorboard",
-    logging_dir="./runs",
-    save_total_limit=2,
-    push_to_hub=False,
-    predict_with_generate=True,
-    gradient_accumulation_steps=4,
-    learning_rate=1e-05,
-    lr_scheduler_type="cosine",
-    warmup_steps=100,
-    load_best_model_at_end=True,
-    eval_strategy="steps", 
-    weight_decay=0.005,
-    eval_on_start=True,
-    metric_for_best_model="cer",
-    greater_is_better=False,
-    label_smoothing_factor=0.1,
-    ddp_find_unused_parameters=True,
-    ddp_backend="gloo",
-    local_rank=-1,
-)
-
-trainer = LabelSmoothingSeq2SeqTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-    processing_class=processor,
-    compute_metrics=compute_metrics,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
-)
-
 if __name__ == "__main__":
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="./outputs",
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=16,
+        num_train_epochs=10,
+        fp16=False,
+        save_steps=1000,
+        logging_steps=100,
+        eval_steps=1000,
+        report_to="tensorboard",
+        logging_dir="./runs",
+        save_total_limit=2,
+        push_to_hub=False,
+        predict_with_generate=True,
+        gradient_accumulation_steps=4,
+        learning_rate=1e-05,
+        lr_scheduler_type="cosine",
+        warmup_steps=100,
+        load_best_model_at_end=True,
+        eval_strategy="steps", 
+        weight_decay=0.005,
+        eval_on_start=True,
+        metric_for_best_model="cer",
+        greater_is_better=False,
+        label_smoothing_factor=0.1,
+        ddp_find_unused_parameters=True,
+        ddp_backend="gloo",
+        local_rank=-1,
+    )
+
+    trainer = LabelSmoothingSeq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        processing_class=processor,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
+    )
     try:
         trainer.train()
     except Exception as e:
         print(f"Training interrupted: {e}")
+else:
+    # For importing in other scripts, create trainer without DDP settings
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="./outputs",
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=8,
+        num_train_epochs=10,
+        fp16=False,
+        save_steps=1000,
+        logging_steps=100,
+        eval_steps=1000,
+        report_to="tensorboard",
+        logging_dir="./runs",
+        save_total_limit=2,
+        push_to_hub=False,
+        predict_with_generate=True,
+        gradient_accumulation_steps=4,
+        learning_rate=1e-05,
+        lr_scheduler_type="cosine",
+        warmup_steps=100,
+        load_best_model_at_end=True,
+        eval_strategy="steps", 
+        weight_decay=0.005,
+        eval_on_start=True,
+        metric_for_best_model="cer",
+        greater_is_better=False,
+        label_smoothing_factor=0.1,
+    )
+    
+    trainer = LabelSmoothingSeq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        processing_class=processor,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
+    )

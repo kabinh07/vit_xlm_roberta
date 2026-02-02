@@ -1,6 +1,6 @@
 .venv
-outputs-p*/*
-runs-p*/*
+outputs*/*
+runs*/*
 *.log
 *.tmp
 .DS_Store
