@@ -348,9 +348,10 @@ if __name__ == "__main__":
         dataloader_persistent_workers=True,
         gradient_checkpointing=True,
         dataloader_prefetch_factor=4,
-        dataloader_pin_memory=True
+        dataloader_pin_memory=True,
         ddp_backend="gloo",
         local_rank=-1,
+        deepspeed="ds_config.json",
     )
 
     trainer = Seq2SeqTrainer(
