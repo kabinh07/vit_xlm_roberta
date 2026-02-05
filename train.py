@@ -69,7 +69,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Load model and processor
 model_dir = "microsoft/trocr-base-stage1"
 decoder_dir = "FacebookAI/xlm-roberta-base"
-ckpt_path = os.path.abspath("/mnt/data/github/vit_xlm_roberta/outputs-p2/checkpoint-20000")
+ckpt_path = os.path.abspath("outputs-p2/checkpoint-20000")
 
 tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
@@ -94,19 +94,21 @@ model.decoder.config.add_cross_attention = True
 
 # print(f"Missing keys: {missing}")
 # print(f"Unexpected keys: {unexpected}")
+with open("best_params.json", "r") as f:
+    best_params = json.load(f)
 
 gen_config = GenerationConfig.from_model_config(model.config)
-gen_config.repetition_penalty = 1.1
-gen_config.max_length = 32
+gen_config.repetition_penalty = best_params["repetition_penalty"]
+gen_config.max_length = 64
 gen_config.early_stopping = True
-gen_config.no_repeat_ngram_size = 3
-gen_config.num_beams = 5
-gen_config.length_penalty = 1.0
+gen_config.no_repeat_ngram_size = best_params["no_repeat_ngram_size"]
+gen_config.num_beams = best_params["num_beams"]
+gen_config.length_penalty = best_params["length_penalty"]
 gen_config.use_cache = True
 
 model.generation_config = gen_config
 
-DATA_DIR = "/mnt/truenas/datasets/synth/nid_data_synth"
+DATA_DIR = "/workspace/data"
 
 class OCRDataset(Dataset):
     def __init__(self, data_dir, processor, max_target_length=32, small_dataset_size=None):
@@ -319,9 +321,9 @@ generation_callback = GenerationCallback(
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir="./outputs",
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=16,
-        num_train_epochs=10,
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=64,
+        num_train_epochs=1000,
         fp16=False,
         save_steps=1000,
         logging_steps=100,
@@ -331,7 +333,7 @@ if __name__ == "__main__":
         save_total_limit=2,
         push_to_hub=False,
         predict_with_generate=True,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=1,
         learning_rate=1e-05,
         lr_scheduler_type="cosine",
         warmup_steps=100,
@@ -341,13 +343,17 @@ if __name__ == "__main__":
         eval_on_start=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        label_smoothing_factor=0.1,
         ddp_find_unused_parameters=True,
+        dataloader_num_workers=12,
+        dataloader_persistent_workers=True,
+        gradient_checkpointing=True,
+        dataloader_prefetch_factor=4,
+        dataloader_pin_memory=True
         ddp_backend="gloo",
         local_rank=-1,
     )
 
-    trainer = LabelSmoothingSeq2SeqTrainer(
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
