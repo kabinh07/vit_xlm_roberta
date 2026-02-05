@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3"
 
 import os
 import jiwer
@@ -380,10 +380,10 @@ else:
         eval_on_start=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        label_smoothing_factor=0.1,
+        deepspeed="ds_config.json",
     )
     
-    trainer = LabelSmoothingSeq2SeqTrainer(
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,

@@ -1,0 +1,10 @@
+{
+  "train_micro_batch_size_per_gpu": 4,
+  "zero_optimization": {
+    "stage": 2,
+    "allgather_partitions": true,
+    "contiguous_gradients": true,
+    "overlap_comm": false,
+    "reduce_scatter": false
+  }
+}
