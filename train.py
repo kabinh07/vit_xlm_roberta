@@ -1,9 +1,15 @@
 import os
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"] = "1"
+os.environ["NCCL_SHM_DISABLE"] = "1"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3"
 
 import os
 import jiwer
+import json
 from PIL import Image
+import mlflow
+import mlflow.pytorch
 
 import torch
 from torch.utils.data import Dataset
@@ -350,10 +356,52 @@ if __name__ == "__main__":
         compute_metrics=compute_metrics,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
     )
-    try:
-        trainer.train()
+    try:    
+            # Train the model
+            trainer.train()
+            print("Training completed")
+
     except Exception as e:
         print(f"Training interrupted: {e}")
+
+    finally:
+        # Start MLflow run
+        with mlflow.start_run():
+            # Log dataset information
+            mlflow.log_param("dataset_path", DATA_DIR)
+            mlflow.log_param("train_size", train_size)
+            mlflow.log_param("val_size", val_size)
+            mlflow.log_param("train_percentage", 0.99)
+            
+            # Log model information
+            mlflow.log_param("encoder_model", model_dir)
+            mlflow.log_param("decoder_model", decoder_dir)
+            mlflow.log_param("checkpoint_path", ckpt_path)
+            
+            # Log generation config parameters
+            mlflow.log_param("repetition_penalty", model.generation_config.repetition_penalty)
+            mlflow.log_param("no_repeat_ngram_size", model.generation_config.no_repeat_ngram_size)
+            mlflow.log_param("num_beams", model.generation_config.num_beams)
+            mlflow.log_param("length_penalty", model.generation_config.length_penalty)
+            mlflow.log_param("max_length", model.generation_config.max_length)
+            
+            # Log training hyperparameters
+            mlflow.log_param("per_device_train_batch_size", training_args.per_device_train_batch_size)
+            mlflow.log_param("per_device_eval_batch_size", training_args.per_device_eval_batch_size)
+            mlflow.log_param("num_train_epochs", training_args.num_train_epochs)
+            mlflow.log_param("learning_rate", training_args.learning_rate)
+            mlflow.log_param("lr_scheduler_type", training_args.lr_scheduler_type)
+            mlflow.log_param("warmup_steps", training_args.warmup_steps)
+            mlflow.log_param("weight_decay", training_args.weight_decay)
+            mlflow.log_param("gradient_accumulation_steps", training_args.gradient_accumulation_steps)
+            mlflow.log_param("eval_strategy", training_args.eval_strategy)
+            mlflow.log_param("eval_steps", training_args.eval_steps)
+            mlflow.log_param("save_steps", training_args.save_steps)
+            mlflow.log_param("logging_steps", training_args.logging_steps)
+
+            # Log total trainable parameters
+            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000000
+            mlflow.log_param("total_trainable_parameters_millions", total_params)
 else:
     # For importing in other scripts, create trainer without DDP settings
     training_args = Seq2SeqTrainingArguments(
