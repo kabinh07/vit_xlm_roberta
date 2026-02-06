@@ -69,7 +69,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Load model and processor
 model_dir = "microsoft/trocr-base-stage1"
 decoder_dir = "FacebookAI/xlm-roberta-base"
-ckpt_path = os.path.abspath("outputs-p2/checkpoint-20000")
+ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
 
 tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
@@ -361,7 +361,7 @@ if __name__ == "__main__":
         eval_dataset=val_dataset,
         processing_class=processor,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=20), generation_callback]
     )
     try:    
             # Train the model

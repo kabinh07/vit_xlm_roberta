@@ -1,6 +1,6 @@
 {
-    "num_beams": 8, 
-    "repetition_penalty": 1.4761353562913189, 
-    "length_penalty": 1.1595855750199626, 
-    "no_repeat_ngram_size": 4
+    "num_beams": 8,
+    "repetition_penalty": 1.064436417433665,
+    "length_penalty": 0.9649864865165343,
+    "no_repeat_ngram_size": 2
 }
