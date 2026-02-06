@@ -70,10 +70,11 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model_dir = "microsoft/trocr-base-stage1"
 decoder_dir = "FacebookAI/xlm-roberta-base"
 ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
+hf_dir = "kavinh07/vit-xlmroberta-nid-ocr"
 
 tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
-model = VisionEncoderDecoderModel.from_pretrained(ckpt_path, local_files_only=True)
+model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
 # model = VisionEncoderDecoderModel.from_pretrained(model_dir)
 # decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
 
@@ -331,14 +332,13 @@ if __name__ == "__main__":
         report_to="tensorboard",
         logging_dir="./runs",
         save_total_limit=2,
-        push_to_hub=False,
         predict_with_generate=True,
         gradient_accumulation_steps=1,
         learning_rate=1e-05,
         lr_scheduler_type="cosine",
         warmup_steps=100,
         load_best_model_at_end=True,
-        eval_strategy="steps", 
+        eval_strategy="steps",
         weight_decay=0.005,
         eval_on_start=True,
         metric_for_best_model="cer",
@@ -352,6 +352,8 @@ if __name__ == "__main__":
         ddp_backend="gloo",
         local_rank=-1,
         deepspeed="ds_config.json",
+        hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
+        push_to_hub=True,
     )
 
     trainer = Seq2SeqTrainer(
@@ -364,9 +366,9 @@ if __name__ == "__main__":
         callbacks=[EarlyStoppingCallback(early_stopping_patience=20), generation_callback]
     )
     try:    
-            # Train the model
-            trainer.train()
-            print("Training completed")
+        # Train the model
+        trainer.train()
+        print("Training completed")
 
     except Exception as e:
         print(f"Training interrupted: {e}")
