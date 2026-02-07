@@ -455,28 +455,106 @@ class GenerationCallback(TrainerCallback):
         else:
             df.to_csv(csv_path, mode="w", index=False)
 
-eval_images = [
-    f'{DATA_DIR}/images/bn_img_2198.png',
-    f'{DATA_DIR}/images/bn_img_9595.png',
-    f'{DATA_DIR}/images/en_img_11559.png',
-    f'{DATA_DIR}/images/en_img_14207.png'
-]
+def extract_eval_samples_from_shards(shard_dir, num_samples=4):
+    """
+    Extract sample images and labels from shards for evaluation.
+    
+    Args:
+        shard_dir: Directory containing tar shards
+        num_samples: Number of samples to extract
+    
+    Returns tuple of (eval_images, eval_texts) - paths to extracted files
+    """
+    import tempfile
+    
+    eval_dir = tempfile.mkdtemp(prefix="eval_samples_")
+    eval_images = []
+    eval_texts = []
+    
+    shard_files = sorted([f for f in os.listdir(shard_dir) if f.endswith(".tar")])
+    if not shard_files:
+        return [], []
+    
+    sample_count = 0
+    for shard_file in shard_files:
+        if sample_count >= num_samples:
+            break
+        
+        shard_path = os.path.join(shard_dir, shard_file)
+        with tarfile.open(shard_path, "r") as tar:
+            members = tar.getmembers()
+            # Get pairs of image and text files
+            image_files = [m for m in members if m.name.endswith((".jpg", ".png"))]
+            
+            for img_member in image_files:
+                if sample_count >= num_samples:
+                    break
+                
+                base_name = img_member.name.rsplit(".", 1)[0]
+                
+                # Extract image
+                img_file = tar.extractfile(img_member)
+                img_path = os.path.join(eval_dir, f"{base_name}.png")
+                with open(img_path, "wb") as f:
+                    f.write(img_file.read())
+                eval_images.append(img_path)
+                
+                # Extract text label
+                try:
+                    txt_member = tar.getmember(f"{base_name}.txt")
+                    txt_file = tar.extractfile(txt_member)
+                    txt_path = os.path.join(eval_dir, f"{base_name}.txt")
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(txt_file.read().decode("utf-8"))
+                    eval_texts.append(txt_path)
+                    sample_count += 1
+                except KeyError:
+                    # No text file, skip this sample
+                    os.remove(img_path)
+                    eval_images.pop()
+                    continue
+    
+    return eval_images, eval_texts
 
-eval_texts = [
-    f'{DATA_DIR}/labels/bn_img_2198.txt',
-    f'{DATA_DIR}/labels/bn_img_9595.txt',
-    f'{DATA_DIR}/labels/en_img_11559.txt',
-    f'{DATA_DIR}/labels/en_img_14207.txt'
-]
 
-generation_callback = GenerationCallback(
-    processor=processor,
-    model=model,
-    eval_images=eval_images,
-    eval_texts=eval_texts,
-    tokenizer=processor.tokenizer,
-    output_dir="./runs"
-)
+eval_images = []
+eval_texts = []
+generation_callback = None
+
+# Check if DATA_DIR is a local directory with images/labels
+if os.path.isdir(DATA_DIR) and not os.path.exists(os.path.join(DATA_DIR, "shard-00000.tar")):
+    # It's a local directory with images/labels structure
+    eval_images = [
+        f'{DATA_DIR}/bn_img_2198.jpg',
+        f'{DATA_DIR}/bn_img_9595.jpg',
+        f'{DATA_DIR}/en_img_11559.jpg',
+        f'{DATA_DIR}/en_img_14207.jpg'
+    ]
+
+    eval_texts = [
+        f'{DATA_DIR}/bn_img_2198.txt',
+        f'{DATA_DIR}/bn_img_9595.txt',
+        f'{DATA_DIR}/en_img_11559.txt',
+        f'{DATA_DIR}/en_img_14207.txt'
+    ]
+else:
+    # Extract samples from shards for evaluation
+    print("Extracting evaluation samples from shards...")
+    eval_images, eval_texts = extract_eval_samples_from_shards(shard_dir, num_samples=4)
+    print(f"Extracted {len(eval_images)} evaluation samples from shards")
+
+# Create generation callback if we have eval samples
+if eval_images and eval_texts:
+    generation_callback = GenerationCallback(
+        processor=processor,
+        model=model,
+        eval_images=eval_images,
+        eval_texts=eval_texts,
+        tokenizer=processor.tokenizer,
+        output_dir="./runs"
+    )
+else:
+    print("Warning: Could not find evaluation samples. Generation callback will be skipped.")
 
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
@@ -522,7 +600,8 @@ if __name__ == "__main__":
         eval_dataset=val_dataset,
         processing_class=processor,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=20), generation_callback]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=20)] + 
+                  ([generation_callback] if generation_callback else [])
     )
     try:    
         # Train the model
@@ -607,5 +686,6 @@ else:
         eval_dataset=val_dataset,
         processing_class=processor,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=10), generation_callback]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)] + 
+                  ([generation_callback] if generation_callback else [])
     )
