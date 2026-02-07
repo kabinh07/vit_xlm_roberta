@@ -541,10 +541,11 @@ if __name__ == "__main__":
             mlflow.log_param("val_size", val_size)
             mlflow.log_param("train_percentage", 0.999)
             
-            # Log model information
-            mlflow.log_param("encoder_model", model_dir)
-            mlflow.log_param("decoder_model", decoder_dir)
-            mlflow.log_param("checkpoint_path", ckpt_path)
+            # # Log model information
+            # mlflow.log_param("encoder_model", model_dir)
+            # mlflow.log_param("decoder_model", decoder_dir)
+            # mlflow.log_param("checkpoint_path", ckpt_path)
+            mlflow.log_param("model_name", hf_dir)
             
             # Log generation config parameters
             mlflow.log_param("repetition_penalty", model.generation_config.repetition_penalty)
