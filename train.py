@@ -562,7 +562,7 @@ if __name__ == "__main__":
         per_device_train_batch_size=32,
         per_device_eval_batch_size=64,
         num_train_epochs=1000,
-        fp16=False,
+        fp16=True,
         save_steps=1000,
         logging_steps=100,
         eval_steps=1000,
@@ -586,8 +586,7 @@ if __name__ == "__main__":
         gradient_checkpointing=True,
         dataloader_prefetch_factor=4,
         dataloader_pin_memory=True,
-        ddp_backend="gloo",
-        local_rank=-1,
+        ddp_backend="nccl",
         deepspeed="ds_config.json",
         hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
         push_to_hub=True,
@@ -605,7 +604,7 @@ if __name__ == "__main__":
     )
     try:    
         # Train the model
-        trainer.train()
+        trainer.train(resume_from_checkpoint=True)
         print("Training completed")
 
     except Exception as e:

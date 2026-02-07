@@ -1,6 +1,7 @@
 .venv
 outputs*/*
 runs*/*
+shards/*
 *.log
 *.tmp
 .DS_Store
