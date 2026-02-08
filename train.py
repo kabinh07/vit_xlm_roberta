@@ -559,30 +559,32 @@ else:
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir="./outputs",
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=64,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=32,
         num_train_epochs=1000,
         fp16=True,
-        save_steps=1000,
+        save_steps=500,
         logging_steps=100,
-        eval_steps=1000,
+        eval_steps=500,
         report_to="tensorboard",
         logging_dir="./runs",
         save_total_limit=2,
         predict_with_generate=True,
-        gradient_accumulation_steps=1,
-        learning_rate=1e-05,
-        lr_scheduler_type="cosine",
-        warmup_steps=100,
+        gradient_accumulation_steps=2,
+        learning_rate=1e-6,
+        lr_scheduler_type="cosine_with_restarts",
+        lr_scheduler_kwargs={"num_cycles": 5},
+        warmup_ratio=0.05,
+        max_grad_norm=1.0,
         load_best_model_at_end=True,
         eval_strategy="steps",
-        weight_decay=0.005,
+        weight_decay=0.001,
         eval_on_start=True,
         metric_for_best_model="cer",
         greater_is_better=False,
         ddp_find_unused_parameters=True,
         dataloader_num_workers=12,
-        dataloader_persistent_workers=True,
+        dataloader_persistent_workers=False,
         gradient_checkpointing=True,
         dataloader_prefetch_factor=4,
         dataloader_pin_memory=True,
@@ -612,6 +614,7 @@ if __name__ == "__main__":
 
     finally:
         # Start MLflow run
+        trainer.push_to_hub()
         with mlflow.start_run():
             # Log dataset information
             mlflow.log_param("dataset_path", DATA_DIR)
@@ -649,42 +652,3 @@ if __name__ == "__main__":
             # Log total trainable parameters
             total_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000000
             mlflow.log_param("total_trainable_parameters_millions", total_params)
-else:
-    # For importing in other scripts, create trainer without DDP settings
-    training_args = Seq2SeqTrainingArguments(
-        output_dir="./outputs",
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=8,
-        num_train_epochs=10,
-        fp16=False,
-        save_steps=1000,
-        logging_steps=100,
-        eval_steps=1000,
-        report_to="tensorboard",
-        logging_dir="./runs",
-        save_total_limit=2,
-        push_to_hub=False,
-        predict_with_generate=True,
-        gradient_accumulation_steps=4,
-        learning_rate=1e-05,
-        lr_scheduler_type="cosine",
-        warmup_steps=100,
-        load_best_model_at_end=True,
-        eval_strategy="steps", 
-        weight_decay=0.005,
-        eval_on_start=True,
-        metric_for_best_model="cer",
-        greater_is_better=False,
-        deepspeed="ds_config.json",
-    )
-    
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        processing_class=processor,
-        compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)] + 
-                  ([generation_callback] if generation_callback else [])
-    )
