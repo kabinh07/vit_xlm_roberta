@@ -4,11 +4,13 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import optuna
 import torch
-from train import val_dataset, tokenizer, model, processor, device
+from train import val_dataset, model, processor, device
 from transformers import GenerationConfig
 from torch.utils.data import Subset, DataLoader
 from PIL import Image
 import jiwer
+
+tokenizer = processor.tokenizer
 
 def objective(trial):
     # Define the search space

@@ -74,7 +74,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # decoder_dir = "FacebookAI/xlm-roberta-base"
 # ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
 hf_dir = "kavinh07/vit-xlmroberta-nid-ocr"
-DATA_DIR = "kavinh07/nid-synth-200k-ocr"
+DATA_DIR = "/mnt/truenas/datasets/synth/nid_data_synth/shards/"
 
 # tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
 # processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
@@ -559,22 +559,21 @@ else:
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir="./outputs",
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=32,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=8,
         num_train_epochs=1000,
-        fp16=True,
+        fp16=False,
         save_steps=500,
         logging_steps=100,
         eval_steps=500,
         report_to="tensorboard",
-        logging_dir="./runs",
-        save_total_limit=2,
+        logging_dir="./outputs/runs",
+        save_total_limit=4,
         predict_with_generate=True,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=4,
         learning_rate=1e-6,
-        lr_scheduler_type="cosine_with_restarts",
-        lr_scheduler_kwargs={"num_cycles": 5},
-        warmup_ratio=0.05,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.03,
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         eval_strategy="steps",
@@ -582,16 +581,17 @@ if __name__ == "__main__":
         eval_on_start=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        ddp_find_unused_parameters=True,
-        dataloader_num_workers=12,
-        dataloader_persistent_workers=False,
-        gradient_checkpointing=True,
-        dataloader_prefetch_factor=4,
-        dataloader_pin_memory=True,
-        ddp_backend="nccl",
-        deepspeed="ds_config.json",
-        hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
-        push_to_hub=True,
+        # ddp_find_unused_parameters=True,
+        # dataloader_num_workers=12,
+        # dataloader_persistent_workers=False,
+        # gradient_checkpointing=True,
+        # dataloader_prefetch_factor=4,
+        # dataloader_pin_memory=True,
+        ddp_backend="gloo",
+        # deepspeed="ds_config.json",
+        local_rank=-1,
+        # hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
+        # push_to_hub=True,
     )
 
     trainer = Seq2SeqTrainer(
@@ -606,7 +606,7 @@ if __name__ == "__main__":
     )
     try:    
         # Train the model
-        trainer.train(resume_from_checkpoint=True)
+        trainer.train()
         print("Training completed")
 
     except Exception as e:
@@ -614,7 +614,7 @@ if __name__ == "__main__":
 
     finally:
         # Start MLflow run
-        trainer.push_to_hub()
+        # trainer.push_to_hub()
         with mlflow.start_run():
             # Log dataset information
             mlflow.log_param("dataset_path", DATA_DIR)
