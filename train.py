@@ -612,7 +612,7 @@ if __name__ == "__main__":
     )
     try:    
         # Train the model
-        trainer.train()
+        trainer.train(resume_from_checkpoint=True)
         print("Training completed")
 
     except Exception as e:
@@ -620,7 +620,7 @@ if __name__ == "__main__":
 
     finally:
         # Start MLflow run
-        # trainer.push_to_hub()
+        trainer.push_to_hub()
         with mlflow.start_run():
             # Log dataset information
             mlflow.log_param("dataset_path", DATA_DIR)
