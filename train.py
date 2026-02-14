@@ -83,8 +83,14 @@ model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
 # model = VisionEncoderDecoderModel.from_pretrained(model_dir)
 # decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
 
+# Update patch_size to 8
+model.encoder.config.patch_size = 8
+
 model.decoder.config.is_decoder = True
 model.decoder.config.add_cross_attention = True
+
+model.config.encoder = model.encoder.config
+model.config.decoder = model.decoder.config
 
 # # Configure decoder
 # model.decoder = decoder
