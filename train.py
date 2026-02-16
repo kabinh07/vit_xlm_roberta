@@ -12,6 +12,7 @@ import mlflow
 import mlflow.pytorch
 import tarfile
 import math
+import numpy as np
 
 import torch
 from torch.utils.data import Dataset
@@ -371,6 +372,7 @@ def compute_metrics(pred):
 
 print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1000000:.2f} million")
 
+
 class GenerationCallback(TrainerCallback):
     def __init__(self, processor, model, eval_images, eval_texts, tokenizer, output_dir="trocr-xlm-roberta-finetuned-synth-400k"):
         self.processor = processor
@@ -380,6 +382,13 @@ class GenerationCallback(TrainerCallback):
         self.tokenizer = tokenizer
         self.output_dir = output_dir
         self.writer = None
+
+    def encoder_heatmap(self, encoder_last_hidden_state):
+        patches = encoder_last_hidden_state.cpu().detach().numpy()[0, 1:, :]  
+        patch_norms = np.linalg.norm(patches, axis=-1)
+        heatmap = patch_norms.reshape(24, 24)
+
+        return heatmap
     
     def on_evaluate(self, args, state, control, trainer=None, **kwargs):
         current_step = state.global_step
@@ -407,8 +416,43 @@ class GenerationCallback(TrainerCallback):
                 true_text = f.read()
             
             with torch.no_grad():
-                generated_ids = self.model.generate(pixel_values)
+                outs = self.model.generate(pixel_values, output_hidden_states=True, return_dict_in_generate=True)
             
+            heatmap = self.encoder_heatmap(outs.encoder_hidden_states[-1])
+            heatmap_tensor = torch.tensor(heatmap).unsqueeze(0).unsqueeze(0)
+            heatmap_upsampled = torch.nn.functional.interpolate(heatmap_tensor, size=(pil_image.height, pil_image.width), mode='bilinear', align_corners=False)[0,0]
+
+            # Log overlay (heatmap on original image) to TensorBoard
+            if self.writer is not None:
+                # Prepare original image as float [0,1]
+                img_np = np.array(pil_image).astype(np.float32) / 255.0  # H,W,3
+
+                # Ensure heatmap is numpy on CPU and normalized to [0,1]
+                hm = heatmap_upsampled.cpu().numpy() if hasattr(heatmap_upsampled, 'cpu') else np.array(heatmap_upsampled)
+                h_min, h_max = hm.min(), hm.max()
+                if h_max > h_min:
+                    h_norm = (hm - h_min) / (h_max - h_min)
+                else:
+                    h_norm = hm
+
+                # Apply a colormap to the heatmap (H,W,3)
+                import matplotlib.cm as cm
+                cmap = cm.get_cmap('viridis')
+                hm_color = cmap(h_norm)[:, :, :3].astype(np.float32)  # drop alpha channel
+
+                # Blend the heatmap color with the original image
+                alpha = 0.5
+                overlay = (img_np * (1.0 - alpha)) + (hm_color * alpha)
+
+                # Convert to CHW for SummaryWriter (`add_image` expects CHW by default)
+                overlay_chw = np.transpose(overlay, (2, 0, 1))
+                img_chw = np.transpose(img_np, (2, 0, 1))
+
+                # Log both the overlay and the original image
+                self.writer.add_image(f"generation/overlay_sample_{i+1}", overlay_chw, current_step)
+                self.writer.add_image(f"generation/image_sample_{i+1}", img_chw, current_step)
+
+            generated_ids = outs.sequences
             generated_text = self.processor.decode(generated_ids[0], skip_special_tokens=True)
             tokens = generated_ids[0].tolist()
             
@@ -557,7 +601,7 @@ if eval_images and eval_texts:
         eval_images=eval_images,
         eval_texts=eval_texts,
         tokenizer=processor.tokenizer,
-        output_dir="./runs"
+        output_dir="./outputs/runs"
     )
 else:
     print("Warning: Could not find evaluation samples. Generation callback will be skipped.")
@@ -574,7 +618,7 @@ if __name__ == "__main__":
         eval_steps=500,
         report_to="tensorboard",
         logging_dir="./outputs/runs",
-        save_total_limit=4,
+        save_total_limit=2,
         predict_with_generate=True,
         gradient_accumulation_steps=4,
         learning_rate=1e-6,
@@ -596,7 +640,7 @@ if __name__ == "__main__":
         ddp_backend="gloo",
         # deepspeed="ds_config.json",
         local_rank=-1,
-        # hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
+        hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
         # push_to_hub=True,
     )
 
