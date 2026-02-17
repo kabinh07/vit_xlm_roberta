@@ -70,37 +70,38 @@ import pandas as pd
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-## Load model and processor
-# model_dir = "microsoft/trocr-base-stage1"
-# decoder_dir = "FacebookAI/xlm-roberta-base"
+# Load model and processor
+model_dir = "microsoft/trocr-base-stage1"
+decoder_dir = "FacebookAI/xlm-roberta-base"
 # ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
-hf_dir = "kavinh07/vit-xlmroberta-nid-ocr"
+hf_dir = "kavinh07/nid-ocr-vit-xlmroberta"
 DATA_DIR = "/mnt/truenas/datasets/synth/nid_data_synth/shards/"
 
-# tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
-# processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
-processor = TrOCRProcessor.from_pretrained(hf_dir)
-model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
-# model = VisionEncoderDecoderModel.from_pretrained(model_dir)
-# decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
+# processor = TrOCRProcessor.from_pretrained(hf_dir)
+# model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
 
-# Update patch_size to 8
-model.encoder.config.patch_size = 8
+tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
+processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
+model = VisionEncoderDecoderModel.from_pretrained(model_dir)
+decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
 
-model.decoder.config.is_decoder = True
-model.decoder.config.add_cross_attention = True
+# # Update patch_size to 8
+# model.encoder.config.patch_size = 8
 
-model.config.encoder = model.encoder.config
-model.config.decoder = model.decoder.config
+# model.decoder.config.is_decoder = True
+# model.decoder.config.add_cross_attention = True
 
-# # Configure decoder
-# model.decoder = decoder
-# model.decoder.config = decoder.config
-# model.config.vocab_size = model.decoder.config.vocab_size
-# model.config.decoder_start_token_id = tokenizer.bos_token_id
-# model.config.pad_token_id = tokenizer.pad_token_id
-# model.config.eos_token_id = tokenizer.eos_token_id
+# model.config.encoder = model.encoder.config
 # model.config.decoder = model.decoder.config
+
+# Configure decoder
+model.decoder = decoder
+model.decoder.config = decoder.config
+model.config.vocab_size = model.decoder.config.vocab_size
+model.config.decoder_start_token_id = tokenizer.bos_token_id
+model.config.pad_token_id = tokenizer.pad_token_id
+model.config.eos_token_id = tokenizer.eos_token_id
+model.config.decoder = model.decoder.config
 
 # state_dict = load_file(f"{ckpt_path}/model.safetensors")
 # missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -368,6 +369,13 @@ def compute_metrics(pred):
     wer = jiwer.wer(label_str, pred_str)
 
     return {"cer": cer, "wer": wer}
+
+
+for name, param in model.encoder.named_parameters(): 
+    param.requires_grad = False
+
+for param in model.encoder.encoder.layer[-2].parameters():
+    param.requires_grad = True
 
 
 print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1000000:.2f} million")
@@ -640,7 +648,7 @@ if __name__ == "__main__":
         ddp_backend="gloo",
         # deepspeed="ds_config.json",
         local_rank=-1,
-        hub_model_id="kavinh07/vit-xlmroberta-nid-ocr",
+        hub_model_id=hf_dir,
         # push_to_hub=True,
     )
 
@@ -656,7 +664,12 @@ if __name__ == "__main__":
     )
     try:    
         # Train the model
-        trainer.train(resume_from_checkpoint=True)
+        if os.path.exists(training_args.output_dir) and any(f.startswith("checkpoint") for f in os.listdir(training_args.output_dir)):
+            print("Resuming training from checkpoint...")
+            trainer.train(resume_from_checkpoint=True)
+        else:
+            print("Starting training from scratch...")
+            trainer.train()
         print("Training completed")
 
     except Exception as e:
