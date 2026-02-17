@@ -76,6 +76,7 @@ decoder_dir = "FacebookAI/xlm-roberta-base"
 # ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
 hf_dir = "kavinh07/nid-ocr-vit-xlmroberta"
 DATA_DIR = "/mnt/truenas/datasets/synth/nid_data_synth/shards/"
+TEST_DIR = "./test_data"
 
 # processor = TrOCRProcessor.from_pretrained(hf_dir)
 # model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
@@ -374,8 +375,8 @@ def compute_metrics(pred):
 for name, param in model.encoder.named_parameters(): 
     param.requires_grad = False
 
-for param in model.encoder.encoder.layer[-2].parameters():
-    param.requires_grad = True
+# for param in model.encoder.encoder.layer[-2].parameters():
+#     param.requires_grad = True
 
 
 print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1000000:.2f} million")
@@ -580,20 +581,24 @@ eval_texts = []
 generation_callback = None
 
 # Check if DATA_DIR is a local directory with images/labels
-if os.path.isdir(DATA_DIR) and not os.path.exists(os.path.join(DATA_DIR, "shard-00000.tar")):
+if os.path.isdir(TEST_DIR):
     # It's a local directory with images/labels structure
     eval_images = [
-        f'{DATA_DIR}/bn_img_2198.jpg',
-        f'{DATA_DIR}/bn_img_9595.jpg',
-        f'{DATA_DIR}/en_img_11559.jpg',
-        f'{DATA_DIR}/en_img_14207.jpg'
+        f'{TEST_DIR}/bn_img_22.png',
+        f'{TEST_DIR}/bn_img_57.png',
+        f'{TEST_DIR}/bn_img_2517.png',
+        f'{TEST_DIR}/en_img_5866.png',
+        f'{TEST_DIR}/en_img_6353.png',
+        f'{TEST_DIR}/en_img_8000.png',
     ]
 
     eval_texts = [
-        f'{DATA_DIR}/bn_img_2198.txt',
-        f'{DATA_DIR}/bn_img_9595.txt',
-        f'{DATA_DIR}/en_img_11559.txt',
-        f'{DATA_DIR}/en_img_14207.txt'
+        f'{TEST_DIR}/bn_img_22.txt',
+        f'{TEST_DIR}/bn_img_57.txt',
+        f'{TEST_DIR}/bn_img_2517.txt',
+        f'{TEST_DIR}/en_img_5866.txt',
+        f'{TEST_DIR}/en_img_6353.txt',
+        f'{TEST_DIR}/en_img_8000.txt'
     ]
 else:
     # Extract samples from shards for evaluation
@@ -629,9 +634,9 @@ if __name__ == "__main__":
         save_total_limit=2,
         predict_with_generate=True,
         gradient_accumulation_steps=4,
-        learning_rate=1e-6,
+        learning_rate=1e-4,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
+        warmup_steps=100,
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         eval_strategy="steps",
@@ -677,7 +682,7 @@ if __name__ == "__main__":
 
     finally:
         # Start MLflow run
-        trainer.push_to_hub()
+        # trainer.push_to_hub()
         with mlflow.start_run():
             # Log dataset information
             mlflow.log_param("dataset_path", DATA_DIR)
