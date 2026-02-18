@@ -75,7 +75,7 @@ model_dir = "microsoft/trocr-base-stage1"
 decoder_dir = "FacebookAI/xlm-roberta-base"
 # ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
 hf_dir = "kavinh07/nid-ocr-vit-xlmroberta"
-DATA_DIR = "/mnt/truenas/datasets/synth/nid_data_synth/shards/"
+DATA_DIR = "kavinh07/synth-200k-ocr"
 TEST_DIR = "./test_data"
 
 # processor = TrOCRProcessor.from_pretrained(hf_dir)
@@ -644,15 +644,15 @@ if __name__ == "__main__":
         eval_on_start=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        # ddp_find_unused_parameters=True,
-        # dataloader_num_workers=12,
-        # dataloader_persistent_workers=False,
-        # gradient_checkpointing=True,
-        # dataloader_prefetch_factor=4,
-        # dataloader_pin_memory=True,
-        ddp_backend="gloo",
-        # deepspeed="ds_config.json",
-        local_rank=-1,
+        ddp_find_unused_parameters=True,
+        dataloader_num_workers=12,
+        dataloader_persistent_workers=False,
+        gradient_checkpointing=True,
+        dataloader_prefetch_factor=4,
+        dataloader_pin_memory=True,
+        # ddp_backend="gloo",
+        deepspeed="ds_config.json",
+        # local_rank=-1,
         hub_model_id=hf_dir,
         # push_to_hub=True,
     )
@@ -664,7 +664,7 @@ if __name__ == "__main__":
         eval_dataset=val_dataset,
         processing_class=processor,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=20)] + 
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)] + 
                   ([generation_callback] if generation_callback else [])
     )
     try:    
@@ -682,7 +682,7 @@ if __name__ == "__main__":
 
     finally:
         # Start MLflow run
-        # trainer.push_to_hub()
+        trainer.push_to_hub()
         with mlflow.start_run():
             # Log dataset information
             mlflow.log_param("dataset_path", DATA_DIR)
