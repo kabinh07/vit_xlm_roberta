@@ -584,6 +584,7 @@ generation_callback = None
 if os.path.isdir(TEST_DIR):
     # It's a local directory with images/labels structure
     eval_images = [
+        f'{TEST_DIR}/bn_000000.png',
         f'{TEST_DIR}/bn_img_22.png',
         f'{TEST_DIR}/bn_img_57.png',
         f'{TEST_DIR}/bn_img_2517.png',
@@ -593,6 +594,7 @@ if os.path.isdir(TEST_DIR):
     ]
 
     eval_texts = [
+        f'{TEST_DIR}/bn_000000.txt',
         f'{TEST_DIR}/bn_img_22.txt',
         f'{TEST_DIR}/bn_img_57.txt',
         f'{TEST_DIR}/bn_img_2517.txt',
@@ -622,13 +624,13 @@ else:
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir="./outputs",
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=16,
         num_train_epochs=1000,
         fp16=False,
-        save_steps=500,
-        logging_steps=100,
-        eval_steps=500,
+        save_steps=250,
+        logging_steps=50,
+        eval_steps=250,
         report_to="tensorboard",
         logging_dir="./outputs/runs",
         save_total_limit=2,
@@ -636,7 +638,7 @@ if __name__ == "__main__":
         gradient_accumulation_steps=4,
         learning_rate=1e-4,
         lr_scheduler_type="cosine",
-        warmup_steps=100,
+        warmup_steps=500,
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         eval_strategy="steps",
@@ -654,7 +656,7 @@ if __name__ == "__main__":
         deepspeed="ds_config.json",
         # local_rank=-1,
         hub_model_id=hf_dir,
-        # push_to_hub=True,
+        push_to_hub=True,
     )
 
     trainer = Seq2SeqTrainer(
