@@ -2,9 +2,7 @@ import os
 os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["NCCL_IB_DISABLE"] = "1"
 os.environ["NCCL_SHM_DISABLE"] = "1"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,3"
 
-import os
 import jiwer
 import json
 from PIL import Image
@@ -13,648 +11,417 @@ import mlflow.pytorch
 import tarfile
 import math
 import numpy as np
+import io
 
 import torch
-from torch.utils.data import Dataset
-from torch.utils.data import random_split
+from torch.utils.data import Dataset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
-from transformers import Seq2SeqTrainer
-from transformers import Seq2SeqTrainingArguments
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel, XLMRobertaForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import (
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+    TrOCRProcessor,
+    VisionEncoderDecoderModel,
+    MBartForCausalLM,
+    MBart50Tokenizer,
+    GenerationConfig,
+)
 from transformers import EarlyStoppingCallback, TrainerCallback
 from datasets import load_dataset
 
-import torch.nn as nn
-
-
-class LabelSmoothingSeq2SeqTrainer(Seq2SeqTrainer):
-    """Custom trainer that handles label smoothing for VisionEncoderDecoderModel."""
-    
-    def __init__(self, label_smoothing_factor=0.0, **kwargs):
-        # Set label_smoothing_factor to 0 in args to prevent default behavior
-        if kwargs.get('args') is not None:
-            self._custom_label_smoothing = kwargs['args'].label_smoothing_factor
-            kwargs['args'].label_smoothing_factor = 0.0
-        else:
-            self._custom_label_smoothing = label_smoothing_factor
-        super().__init__(**kwargs)
-    
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels = inputs.get("labels")
-        outputs = model(**inputs)
-        logits = outputs.logits
-        
-        if labels is not None and self._custom_label_smoothing > 0:
-            # Compute label smoothing loss manually
-            loss_fct = nn.CrossEntropyLoss(
-                ignore_index=-100,
-                label_smoothing=self._custom_label_smoothing
-            )
-            # Shift logits and labels for causal LM
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        else:
-            loss = outputs.loss
-        
-        return (loss, outputs) if return_outputs else loss
-
-from safetensors.torch import load_file
-
-import random
-
-import unicodedata
-
 import pandas as pd
+import unicodedata
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Load model and processor
-model_dir = "microsoft/trocr-base-stage1"
-decoder_dir = "FacebookAI/xlm-roberta-base"
-# ckpt_path = os.path.abspath("outputs-p3/checkpoint-18000")
-hf_dir = "kavinh07/nid-ocr-vit-xlmroberta"
-DATA_DIR = "kavinh07/synth-200k-ocr"
-TEST_DIR = "./test_data"
+trocr_dir   = "microsoft/trocr-base-stage1"
+decoder_dir = "facebook/mbart-large-50"
+hf_dir      = "kavinh07/nid-ocr-vit-mbart50"
+DATA_DIR    = "kavinh07/synth-200k-ocr"
+TEST_DIR    = "./test_data"
 
-# processor = TrOCRProcessor.from_pretrained(hf_dir)
-# model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
+LANG_CODE_BN = "bn_IN"
+LANG_CODE_EN = "en_XX"
 
-tokenizer = AutoTokenizer.from_pretrained(decoder_dir)
-processor = TrOCRProcessor.from_pretrained(model_dir, tokenizer=tokenizer)
-model = VisionEncoderDecoderModel.from_pretrained(model_dir)
-decoder = XLMRobertaForCausalLM.from_pretrained(decoder_dir, is_decoder=True, add_cross_attention=True)
+tokenizer = MBart50Tokenizer.from_pretrained(
+    decoder_dir,
+    src_lang=LANG_CODE_BN,
+    tgt_lang=LANG_CODE_BN,
+)
+processor = TrOCRProcessor.from_pretrained(trocr_dir, tokenizer=tokenizer)
 
-# # Update patch_size to 8
-# model.encoder.config.patch_size = 8
+# FIX 1: per-sample language detection
+def detect_lang_token_id(text: str) -> int:
+    bangla_chars = sum(1 for c in text if "\u0980" <= c <= "\u09FF")
+    ratio = bangla_chars / max(len(text.strip()), 1)
+    return BN_TOKEN_ID if ratio >= 0.3 else EN_TOKEN_ID
 
-# model.decoder.config.is_decoder = True
-# model.decoder.config.add_cross_attention = True
+model = VisionEncoderDecoderModel.from_pretrained(hf_dir)
 
-# model.config.encoder = model.encoder.config
-# model.config.decoder = model.decoder.config
+BN_TOKEN_ID = tokenizer.lang_code_to_id[LANG_CODE_BN]
+EN_TOKEN_ID = tokenizer.lang_code_to_id[LANG_CODE_EN]
 
-# Configure decoder
-model.decoder = decoder
-model.decoder.config = decoder.config
-model.config.vocab_size = model.decoder.config.vocab_size
-model.config.decoder_start_token_id = tokenizer.bos_token_id
-model.config.pad_token_id = tokenizer.pad_token_id
-model.config.eos_token_id = tokenizer.eos_token_id
-model.config.decoder = model.decoder.config
+# # forced_bos_token_id NOT set globally - applied per-sample at inference
+# model.config.decoder_start_token_id = BN_TOKEN_ID
+# model.config.pad_token_id           = tokenizer.pad_token_id
+# model.config.eos_token_id           = tokenizer.eos_token_id
+# model.config.vocab_size             = model.decoder.config.vocab_size
 
-# state_dict = load_file(f"{ckpt_path}/model.safetensors")
-# missing, unexpected = model.load_state_dict(state_dict, strict=False)
+# model.generation_config.decoder_start_token_id = BN_TOKEN_ID
+# model.generation_config.pad_token_id           = tokenizer.pad_token_id
+# model.generation_config.eos_token_id           = tokenizer.eos_token_id
 
-# print(f"Missing keys: {missing}")
-# print(f"Unexpected keys: {unexpected}")
+# print(f"enc_to_dec_proj : {model.enc_to_dec_proj}")
+# print(f"Encoder hidden  : {vit_encoder.config.hidden_size}")
+# print(f"Decoder hidden  : {mbart_decoder.config.hidden_size}")
+
+# FIX 2: beam search + no_repeat_ngram; FIX 3: max_length=128
 with open("best_params.json", "r") as f:
     best_params = json.load(f)
 
-gen_config = GenerationConfig.from_model_config(model.config)
-gen_config.repetition_penalty = best_params["repetition_penalty"]
-gen_config.max_length = 64
-gen_config.early_stopping = True
-gen_config.no_repeat_ngram_size = best_params["no_repeat_ngram_size"]
-gen_config.num_beams = best_params["num_beams"]
-gen_config.length_penalty = best_params["length_penalty"]
-gen_config.use_cache = True
+model.generation_config.repetition_penalty   = best_params.get("repetition_penalty", 1.3)
+model.generation_config.no_repeat_ngram_size = 3
+model.generation_config.num_beams            = 4
+model.generation_config.length_penalty       = 1.0
+model.generation_config.max_length           = 128
+model.generation_config.early_stopping       = True
+model.generation_config.use_cache            = True
 
-model.generation_config = gen_config
+for param in model.encoder.parameters():
+    param.requires_grad = False
+for param in model.encoder.encoder.layer[-1].parameters():
+    param.requires_grad = True
+for param in model.enc_to_dec_proj.parameters():
+    param.requires_grad = True
+
+print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M")
+
 
 def prepare_sharded_dataset(data_source, shard_dir="shards", samples_per_shard=2000, max_shards=None):
-    """
-    Load existing shards or download dataset from HuggingFace and create shards.
-    
-    Args:
-        data_source: Path to existing shards directory OR HuggingFace dataset identifier
-        shard_dir: Directory to store/load shards
-        samples_per_shard: Number of samples per shard
-        max_shards: Limit number of shards to use (None = use all)
-    
-    Returns path to shard directory.
-    """
     os.makedirs(shard_dir, exist_ok=True)
-    
-    # Check if shards already exist locally
     existing_shards = sorted([f for f in os.listdir(shard_dir) if f.endswith(".tar")])
-    
-    # If shards exist, use them
     if existing_shards:
-        if max_shards:
-            existing_shards = existing_shards[:max_shards]
-            print(f"Using {len(existing_shards)} existing shards (limited to {max_shards})")
-        else:
-            print(f"Using {len(existing_shards)} existing shards")
+        shards = existing_shards[:max_shards] if max_shards else existing_shards
+        print(f"Using {len(shards)} existing shards")
         return shard_dir
-    
-    # Check if data_source is a local directory with shards
-    if os.path.isdir(data_source) and os.path.exists(data_source):
-        print(f"Loading shards from {data_source}...")
+    if os.path.isdir(data_source):
+        import shutil
         source_shards = sorted([f for f in os.listdir(data_source) if f.endswith(".tar")])
-        
         if source_shards:
-            # Copy shards from source directory
-            import shutil
             if max_shards:
                 source_shards = source_shards[:max_shards]
-            
-            for shard_file in source_shards:
-                src = os.path.join(data_source, shard_file)
-                dst = os.path.join(shard_dir, shard_file)
+            for sf in source_shards:
+                src = os.path.join(data_source, sf)
+                dst = os.path.join(shard_dir, sf)
                 if not os.path.exists(dst):
-                    print(f"Copying {shard_file}...")
                     shutil.copy2(src, dst)
-            
             print(f"Loaded {len(source_shards)} shards from {data_source}")
             return shard_dir
-    
-    # Otherwise, assume it's a HuggingFace dataset identifier and download it
-    print(f"Downloading dataset from HuggingFace: {data_source}...")
-    dataset = load_dataset(data_source, split="train")
-    
+    print(f"Downloading dataset: {data_source} ...")
+    dataset     = load_dataset(data_source, split="train")
     num_samples = len(dataset)
-    num_shards = math.ceil(num_samples / samples_per_shard)
-    
-    # Limit shards if max_shards is specified
+    num_shards  = math.ceil(num_samples / samples_per_shard)
     if max_shards:
-        num_shards = min(num_shards, max_shards)
-        # Limit dataset accordingly
-        max_samples = num_shards * samples_per_shard
-        dataset = dataset.select(range(min(max_samples, len(dataset))))
+        num_shards  = min(num_shards, max_shards)
+        dataset     = dataset.select(range(min(num_shards * samples_per_shard, len(dataset))))
         num_samples = len(dataset)
-    
-    print(f"Creating {num_shards} shards from {num_samples} samples...")
+    print(f"Creating {num_shards} shards ...")
     for shard_id in range(num_shards):
-        start = shard_id * samples_per_shard
-        end = min((shard_id + 1) * samples_per_shard, num_samples)
-        
-        shard_path = os.path.join(shard_dir, f"shard-{shard_id:05d}.tar")
-        
-        # Get samples for this shard
+        start         = shard_id * samples_per_shard
+        end           = min(start + samples_per_shard, num_samples)
+        shard_path    = os.path.join(shard_dir, f"shard-{shard_id:05d}.tar")
         shard_dataset = dataset.select(range(start, end))
-        
         with tarfile.open(shard_path, "w") as tar:
-            import io
             for idx, sample in enumerate(shard_dataset):
-                # The dataset has 'jpg' (Image) and 'txt' (string) columns
                 image = sample["jpg"]
-                text = sample["txt"]
-                
-                # Save image to bytes
-                img_bytes = io.BytesIO()
-                if isinstance(image, Image.Image):
-                    image.save(img_bytes, format="PNG")
-                else:
-                    image.save(img_bytes, format="PNG")
-                
-                # Get the image bytes and reset pointer
-                img_data = img_bytes.getvalue()
-                img_bytes = io.BytesIO(img_data)
-                img_bytes.seek(0)
-                
-                # Create tar info for image
-                img_tarinfo = tarfile.TarInfo(name=f"sample_{start + idx:06d}.png")
-                img_tarinfo.size = len(img_data)
-                tar.addfile(tarinfo=img_tarinfo, fileobj=img_bytes)
-                
-                # Create tar info for text
-                text_bytes = text.encode("utf-8")
-                text_bytesio = io.BytesIO(text_bytes)
-                text_bytesio.seek(0)
-                txt_tarinfo = tarfile.TarInfo(name=f"sample_{start + idx:06d}.txt")
-                txt_tarinfo.size = len(text_bytes)
-                tar.addfile(tarinfo=txt_tarinfo, fileobj=text_bytesio)
-        
+                text  = sample["txt"]
+                img_buf = io.BytesIO()
+                image.save(img_buf, format="PNG")
+                img_data = img_buf.getvalue()
+                ti = tarfile.TarInfo(name=f"sample_{start+idx:06d}.png")
+                ti.size = len(img_data)
+                tar.addfile(ti, io.BytesIO(img_data))
+                tb = text.encode("utf-8")
+                tt = tarfile.TarInfo(name=f"sample_{start+idx:06d}.txt")
+                tt.size = len(tb)
+                tar.addfile(tt, io.BytesIO(tb))
         if (shard_id + 1) % max(1, num_shards // 10) == 0:
-            print(f"  Created {shard_id + 1}/{num_shards} shards")
-    
+            print(f"  {shard_id+1}/{num_shards} shards done")
     return shard_dir
 
 
 class ShardedOCRDataset(Dataset):
-    """Load data from tar shards instead of raw files."""
-    def __init__(self, shard_dir, processor, max_target_length=32, max_samples=None):
-        """
-        Args:
-            shard_dir: Directory containing tar shards
-            processor: TrOCRProcessor instance
-            max_target_length: Maximum target sequence length
-            max_samples: Limit total samples (None = use all)
-        """
-        self.processor = processor
-        self.tokenizer = processor.tokenizer
+    def __init__(self, shard_dir, processor, max_target_length=128, max_samples=None):
+        self.processor         = processor
+        self.tokenizer         = processor.tokenizer
         self.max_target_length = max_target_length
-        self.shard_dir = shard_dir
-        self.samples = []
-        
-        # Index all samples from shards
+        self.samples           = []
         shard_files = sorted([f for f in os.listdir(shard_dir) if f.endswith(".tar")])
-        
-        for shard_file in shard_files:
-            shard_path = os.path.join(shard_dir, shard_file)
-            with tarfile.open(shard_path, "r") as tar:
+        for sf in shard_files:
+            with tarfile.open(os.path.join(shard_dir, sf), "r") as tar:
                 for member in tar.getmembers():
-                    # Support both .jpg (existing shards) and .png (new shards) formats
-                    if member.name.endswith(".jpg") or member.name.endswith(".png"):
-                        # Remove extension and store (we'll add it back in __getitem__)
-                        base_name = member.name.rsplit(".", 1)[0]
-                        self.samples.append((shard_path, base_name))
-                        
-                        # Stop if we reach max_samples
+                    if member.name.endswith((".jpg", ".png")):
+                        base = member.name.rsplit(".", 1)[0]
+                        self.samples.append((os.path.join(shard_dir, sf), base))
                         if max_samples and len(self.samples) >= max_samples:
                             break
-            
             if max_samples and len(self.samples) >= max_samples:
                 break
-        
-        if max_samples and len(self.samples) > max_samples:
+        if max_samples:
             self.samples = self.samples[:max_samples]
-        
         print(f"Loaded {len(self.samples)} samples from {len(shard_files)} shards")
-    
+
     def __len__(self):
         return len(self.samples)
-    
+
     def __getitem__(self, idx):
-        shard_path, base_name = self.samples[idx]
-        
-        # Open tar file and extract image and label
+        shard_path, base = self.samples[idx]
         with tarfile.open(shard_path, "r") as tar:
-            # Try to find image (could be .jpg or .png)
             image = None
-            img_member = None
-            
-            for ext in [".jpg", ".png"]:
+            for ext in (".jpg", ".png"):
                 try:
-                    img_member = tar.getmember(f"{base_name}{ext}")
-                    img_file = tar.extractfile(img_member)
-                    image = Image.open(img_file).convert("RGB")
+                    image = Image.open(
+                        tar.extractfile(tar.getmember(f"{base}{ext}"))
+                    ).convert("RGB")
                     break
                 except KeyError:
                     continue
-            
             if image is None:
-                raise FileNotFoundError(f"Could not find image for {base_name} in {shard_path}")
-            
-            # Read label
-            lbl_member = tar.getmember(f"{base_name}.txt")
-            lbl_file = tar.extractfile(lbl_member)
-            text = lbl_file.read().decode("utf-8").strip()
-        
-        text = unicodedata.normalize("NFKC", text)
-        pixel_values = self.processor(image, return_tensors="pt")["pixel_values"]
-        tokenized = self.processor.tokenizer(
+                raise FileNotFoundError(f"No image for {base}")
+            text = tar.extractfile(
+                tar.getmember(f"{base}.txt")
+            ).read().decode("utf-8").strip()
+        text         = unicodedata.normalize("NFKC", text)
+        pixel_values = self.processor(image, return_tensors="pt")["pixel_values"].squeeze()
+        tokenized = self.tokenizer(
             text,
             padding="max_length",
             max_length=self.max_target_length,
             truncation=True,
-            return_tensors="pt"
+            return_tensors="pt",
         )
-        
         labels = tokenized.input_ids.squeeze()
         labels[labels == self.tokenizer.pad_token_id] = -100
-        
-        encoding = {
-            "pixel_values": pixel_values.squeeze(),
-            "labels": labels
-        }
-        return encoding
+        return {"pixel_values": pixel_values, "labels": labels}
 
-# ============================================
-# TESTING MODE CONFIGURATION
-# ============================================
-# Set these to limit data for quick testing
-TEST_MODE = False  # Set to False for full training
-MAX_SHARDS = None    # Use only first N shards (None = use all)
-MAX_SAMPLES = None  # Limit total samples (None = no limit)
-# ============================================
 
-# Prepare sharded dataset
-# If local shards exist, use them; otherwise download from HuggingFace
+TEST_MODE   = False
+MAX_SHARDS  = None
+MAX_SAMPLES = None
+
 shard_dir = prepare_sharded_dataset(
     data_source=DATA_DIR,
     shard_dir="shards",
     samples_per_shard=2000,
-    max_shards=MAX_SHARDS if TEST_MODE else None
+    max_shards=MAX_SHARDS if TEST_MODE else None,
 )
 
 data = ShardedOCRDataset(
-    shard_dir=shard_dir, 
+    shard_dir=shard_dir,
     processor=processor,
-    max_samples=MAX_SAMPLES if TEST_MODE else None
+    max_target_length=128,
+    max_samples=MAX_SAMPLES if TEST_MODE else None,
 )
 
-print(f"Sample of dataset:\n{data[0]}")
-
 train_size = int(0.999 * len(data))
-val_size = len(data) - train_size
-
+val_size   = len(data) - train_size
 train_dataset, val_dataset = random_split(data, [train_size, val_size])
-print(f"Train Size: {len(train_dataset)}\nTest Size: {len(val_dataset)}")
+print(f"Train: {train_size}  Val: {val_size}")
 
 
 def compute_metrics(pred):
-    pred_ids = pred.predictions
+    pred_ids  = pred.predictions
     label_ids = pred.label_ids
-
-    # Replace -100 with pad_token_id
-    pred_ids[pred_ids == -100] = processor.tokenizer.pad_token_id
-    label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-
-    pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
-    label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
-
-    cer = jiwer.cer(label_str, pred_str)
-    wer = jiwer.wer(label_str, pred_str)
-
-    return {"cer": cer, "wer": wer}
-
-
-for name, param in model.encoder.named_parameters(): 
-    param.requires_grad = False
-
-# for param in model.encoder.encoder.layer[-2].parameters():
-#     param.requires_grad = True
-
-
-print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1000000:.2f} million")
+    pred_ids[pred_ids == -100]   = tokenizer.pad_token_id
+    label_ids[label_ids == -100] = tokenizer.pad_token_id
+    pred_str  = tokenizer.batch_decode(pred_ids,  skip_special_tokens=True)
+    label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+    return {
+        "cer": jiwer.cer(label_str, pred_str),
+        "wer": jiwer.wer(label_str, pred_str),
+    }
 
 
 class GenerationCallback(TrainerCallback):
-    def __init__(self, processor, model, eval_images, eval_texts, tokenizer, output_dir="trocr-xlm-roberta-finetuned-synth-400k"):
-        self.processor = processor
-        self.model = model
+    def __init__(self, processor, model, eval_images, eval_texts, tokenizer, output_dir="./outputs/runs"):
+        self.processor   = processor
+        self.model       = model
         self.eval_images = eval_images
-        self.eval_texts = eval_texts
-        self.tokenizer = tokenizer
-        self.output_dir = output_dir
-        self.writer = None
+        self.eval_texts  = eval_texts
+        self.tokenizer   = tokenizer
+        self.output_dir  = output_dir
+        self.writer      = None
 
-    def encoder_heatmap(self, encoder_last_hidden_state):
-        patches = encoder_last_hidden_state.cpu().detach().numpy()[0, 1:, :]  
-        patch_norms = np.linalg.norm(patches, axis=-1)
-        heatmap = patch_norms.reshape(24, 24)
+    def encoder_heatmap(self, hidden_state):
+        patches = hidden_state.cpu().detach().numpy()[0, 1:, :]
+        return np.linalg.norm(patches, axis=-1).reshape(24, 24)
 
-        return heatmap
-    
     def on_evaluate(self, args, state, control, trainer=None, **kwargs):
-        current_step = state.global_step
-        
-        # Initialize SummaryWriter if not already done
+        step = state.global_step
         if self.writer is None:
             self.writer = SummaryWriter(log_dir=self.output_dir)
-        
-        # Metrics to track step-wise
-        metrics_log = {"step": current_step}
-        repetition_count = 0
-        avg_generated_length = 0
-        
-        # Build text summary for TensorBoard
-        text_summary = f"## Generation Test - Step {current_step}\n\n"
-        
-        
+        repetition_count, total_len = 0, 0
+        text_summary = f"## Generation Test - Step {step}\n\n"
         self.model.eval()
-        
-        for i, (image, text) in enumerate(zip(self.eval_images, self.eval_texts)):
-            pil_image = Image.open(image).convert("RGB")
-            pixel_values = self.processor(images=pil_image, return_tensors="pt").pixel_values.to(self.model.device)
 
-            with open(text, "r", encoding="utf-8") as f:
-                true_text = f.read()
-            
+        for i, (img_path, txt_path) in enumerate(zip(self.eval_images, self.eval_texts)):
+            pil   = Image.open(img_path).convert("RGB")
+            pv    = self.processor(images=pil, return_tensors="pt").pixel_values.to(self.model.device)
+            truth = open(txt_path, encoding="utf-8").read().strip()
+
+            # FIX 1: per-sample language routing
+            lang_bos  = detect_lang_token_id(truth)
+            lang_name = "bn_IN" if lang_bos == BN_TOKEN_ID else "en_XX"
+
             with torch.no_grad():
-                outs = self.model.generate(pixel_values, output_hidden_states=True, return_dict_in_generate=True)
-            
-            heatmap = self.encoder_heatmap(outs.encoder_hidden_states[-1])
-            heatmap_tensor = torch.tensor(heatmap).unsqueeze(0).unsqueeze(0)
-            heatmap_upsampled = torch.nn.functional.interpolate(heatmap_tensor, size=(pil_image.height, pil_image.width), mode='bilinear', align_corners=False)[0,0]
+                outs = self.model.generate(
+                    pv,
+                    forced_bos_token_id=lang_bos,
+                    num_beams=4,
+                    no_repeat_ngram_size=3,
+                    max_length=128,
+                    output_hidden_states=True,
+                    return_dict_in_generate=True,
+                )
 
-            # Log overlay (heatmap on original image) to TensorBoard
-            if self.writer is not None:
-                # Prepare original image as float [0,1]
-                img_np = np.array(pil_image).astype(np.float32) / 255.0  # H,W,3
+            hm = self.encoder_heatmap(outs.encoder_hidden_states[-1])
+            hm_up = torch.nn.functional.interpolate(
+                torch.tensor(hm).unsqueeze(0).unsqueeze(0),
+                size=(pil.height, pil.width), mode="bilinear", align_corners=False
+            )[0, 0].numpy()
 
-                # Ensure heatmap is numpy on CPU and normalized to [0,1]
-                hm = heatmap_upsampled.cpu().numpy() if hasattr(heatmap_upsampled, 'cpu') else np.array(heatmap_upsampled)
-                h_min, h_max = hm.min(), hm.max()
-                if h_max > h_min:
-                    h_norm = (hm - h_min) / (h_max - h_min)
-                else:
-                    h_norm = hm
-
-                # Apply a colormap to the heatmap (H,W,3)
+            if self.writer:
+                img_np = np.array(pil).astype(np.float32) / 255.0
+                h_min, h_max = hm_up.min(), hm_up.max()
+                h_norm = (hm_up - h_min) / (h_max - h_min + 1e-8)
                 import matplotlib.cm as cm
-                cmap = cm.get_cmap('viridis')
-                hm_color = cmap(h_norm)[:, :, :3].astype(np.float32)  # drop alpha channel
+                hm_color = cm.get_cmap("viridis")(h_norm)[:, :, :3].astype(np.float32)
+                overlay  = img_np * 0.5 + hm_color * 0.5
+                self.writer.add_image(f"gen/overlay_{i+1}", np.transpose(overlay, (2,0,1)), step)
+                self.writer.add_image(f"gen/image_{i+1}",   np.transpose(img_np,  (2,0,1)), step)
 
-                # Blend the heatmap color with the original image
-                alpha = 0.5
-                overlay = (img_np * (1.0 - alpha)) + (hm_color * alpha)
+            gen_text = self.tokenizer.decode(outs.sequences[0], skip_special_tokens=True)
+            tokens   = outs.sequences[0].tolist()
+            total_len += len(tokens)
 
-                # Convert to CHW for SummaryWriter (`add_image` expects CHW by default)
-                overlay_chw = np.transpose(overlay, (2, 0, 1))
-                img_chw = np.transpose(img_np, (2, 0, 1))
+            text_summary += f"### Sample {i+1} [{lang_name}]\n"
+            text_summary += f"**GT:**   {truth}\n\n"
+            text_summary += f"**Pred:** {gen_text}\n\n"
 
-                # Log both the overlay and the original image
-                self.writer.add_image(f"generation/overlay_sample_{i+1}", overlay_chw, current_step)
-                self.writer.add_image(f"generation/image_sample_{i+1}", img_chw, current_step)
-
-            generated_ids = outs.sequences
-            generated_text = self.processor.decode(generated_ids[0], skip_special_tokens=True)
-            tokens = generated_ids[0].tolist()
-            
-            # Add to text summary for TensorBoard
-            text_summary += f"### Sample {i+1}\n"
-            text_summary += f"**Ground Truth:** {true_text}\n\n"
-            text_summary += f"**Generated:** {generated_text}\n\n"
-
-            # Check repetition
-            has_repetition = False
             if len(tokens) > 3 and len(set(tokens[1:-1])) == 1:
-                has_repetition = True
                 repetition_count += 1
-                text_summary += f"⚠️ **WARNING:** REPETITION DETECTED!\n\n"
-            
-            # Track generated length
-            avg_generated_length += len(tokens)
-        
-        # Calculate averages and log to TensorBoard
-        avg_generated_length = avg_generated_length / len(self.eval_images)
-        repetition_rate = (repetition_count / len(self.eval_images)) * 100
-        
-        # Add summary metrics to text
-        text_summary += f"\n### Metrics Summary\n"
-        text_summary += f"- **Repetition Count:** {repetition_count}/{len(self.eval_images)}\n"
-        text_summary += f"- **Repetition Rate:** {repetition_rate:.1f}%\n"
-        text_summary += f"- **Average Length:** {avg_generated_length:.1f} tokens\n"
-        
-        # Log text to TensorBoard
-        if self.writer is not None:
-            self.writer.add_text("generation/samples", text_summary, current_step)
+                text_summary += "WARNING: REPETITION DETECTED\n\n"
+
+        n    = max(len(self.eval_images), 1)
+        avg  = total_len / n
+        rate = repetition_count / n * 100
+
+        text_summary += f"\n**Repetitions:** {repetition_count}/{n}  **Rate:** {rate:.1f}%  **Avg len:** {avg:.1f}\n"
+        if self.writer:
+            self.writer.add_text("gen/samples", text_summary, step)
             self.writer.flush()
-        
-        # Log metrics to TensorBoard via trainer
-        tensorboard_metrics = {
-            "generation/repetition_count": repetition_count,
-            "generation/repetition_rate": repetition_rate,
-            "generation/avg_length": avg_generated_length,
-        }
-        
-        if trainer is not None:
-            trainer.log(tensorboard_metrics)
-        
-        # Also save to CSV for easy tracking
+
+        metrics = {"gen/repetition_rate": rate, "gen/avg_length": avg}
+        if trainer:
+            trainer.log(metrics)
+
         csv_path = "generation_metrics.csv"
-        csv_metrics = {"step": current_step, **tensorboard_metrics}
-        df = pd.DataFrame([csv_metrics])
-        if os.path.exists(csv_path):
-            df.to_csv(csv_path, mode="a", header=False, index=False)
-        else:
-            df.to_csv(csv_path, mode="w", index=False)
+        df = pd.DataFrame([{"step": step, **metrics}])
+        df.to_csv(csv_path, mode="a", header=not os.path.exists(csv_path), index=False)
+
 
 def extract_eval_samples_from_shards(shard_dir, num_samples=4):
-    """
-    Extract sample images and labels from shards for evaluation.
-    
-    Args:
-        shard_dir: Directory containing tar shards
-        num_samples: Number of samples to extract
-    
-    Returns tuple of (eval_images, eval_texts) - paths to extracted files
-    """
     import tempfile
-    
-    eval_dir = tempfile.mkdtemp(prefix="eval_samples_")
-    eval_images = []
-    eval_texts = []
-    
-    shard_files = sorted([f for f in os.listdir(shard_dir) if f.endswith(".tar")])
-    if not shard_files:
-        return [], []
-    
-    sample_count = 0
-    for shard_file in shard_files:
-        if sample_count >= num_samples:
+    eval_dir = tempfile.mkdtemp(prefix="eval_")
+    imgs, txts, count = [], [], 0
+    for sf in sorted(f for f in os.listdir(shard_dir) if f.endswith(".tar")):
+        if count >= num_samples:
             break
-        
-        shard_path = os.path.join(shard_dir, shard_file)
-        with tarfile.open(shard_path, "r") as tar:
-            members = tar.getmembers()
-            # Get pairs of image and text files
-            image_files = [m for m in members if m.name.endswith((".jpg", ".png"))]
-            
-            for img_member in image_files:
-                if sample_count >= num_samples:
-                    break
-                
-                base_name = img_member.name.rsplit(".", 1)[0]
-                
-                # Extract image
-                img_file = tar.extractfile(img_member)
-                img_path = os.path.join(eval_dir, f"{base_name}.png")
-                with open(img_path, "wb") as f:
-                    f.write(img_file.read())
-                eval_images.append(img_path)
-                
-                # Extract text label
-                try:
-                    txt_member = tar.getmember(f"{base_name}.txt")
-                    txt_file = tar.extractfile(txt_member)
-                    txt_path = os.path.join(eval_dir, f"{base_name}.txt")
-                    with open(txt_path, "w", encoding="utf-8") as f:
-                        f.write(txt_file.read().decode("utf-8"))
-                    eval_texts.append(txt_path)
-                    sample_count += 1
-                except KeyError:
-                    # No text file, skip this sample
-                    os.remove(img_path)
-                    eval_images.pop()
+        with tarfile.open(os.path.join(shard_dir, sf), "r") as tar:
+            for m in tar.getmembers():
+                if not m.name.endswith((".jpg", ".png")):
                     continue
-    
-    return eval_images, eval_texts
+                base = m.name.rsplit(".", 1)[0]
+                try:
+                    txt_m = tar.getmember(f"{base}.txt")
+                except KeyError:
+                    continue
+                ip = os.path.join(eval_dir, f"{base}.png")
+                with open(ip, "wb") as f:
+                    f.write(tar.extractfile(m).read())
+                tp = os.path.join(eval_dir, f"{base}.txt")
+                with open(tp, "w", encoding="utf-8") as f:
+                    f.write(tar.extractfile(txt_m).read().decode("utf-8"))
+                imgs.append(ip)
+                txts.append(tp)
+                count += 1
+                if count >= num_samples:
+                    break
+    return imgs, txts
 
 
-eval_images = []
-eval_texts = []
-generation_callback = None
-
-# Check if DATA_DIR is a local directory with images/labels
 if os.path.isdir(TEST_DIR):
-    # It's a local directory with images/labels structure
     eval_images = [
-        f'{TEST_DIR}/bn_img_22.png',
-        f'{TEST_DIR}/bn_img_57.png',
-        f'{TEST_DIR}/bn_img_2517.png',
-        f'{TEST_DIR}/en_img_5866.png',
-        f'{TEST_DIR}/en_img_6353.png',
-        f'{TEST_DIR}/en_img_8000.png',
+        f"{TEST_DIR}/bn_000000.png",   f"{TEST_DIR}/bn_img_22.png",
+        f"{TEST_DIR}/bn_img_57.png",   f"{TEST_DIR}/bn_img_2517.png",
+        f"{TEST_DIR}/en_img_5866.png", f"{TEST_DIR}/en_img_6353.png",
+        f"{TEST_DIR}/en_img_8000.png",
     ]
-
     eval_texts = [
-        f'{TEST_DIR}/bn_img_22.txt',
-        f'{TEST_DIR}/bn_img_57.txt',
-        f'{TEST_DIR}/bn_img_2517.txt',
-        f'{TEST_DIR}/en_img_5866.txt',
-        f'{TEST_DIR}/en_img_6353.txt',
-        f'{TEST_DIR}/en_img_8000.txt'
+        f"{TEST_DIR}/bn_000000.txt",   f"{TEST_DIR}/bn_img_22.txt",
+        f"{TEST_DIR}/bn_img_57.txt",   f"{TEST_DIR}/bn_img_2517.txt",
+        f"{TEST_DIR}/en_img_5866.txt", f"{TEST_DIR}/en_img_6353.txt",
+        f"{TEST_DIR}/en_img_8000.txt",
     ]
 else:
-    # Extract samples from shards for evaluation
-    print("Extracting evaluation samples from shards...")
+    print("Extracting eval samples from shards...")
     eval_images, eval_texts = extract_eval_samples_from_shards(shard_dir, num_samples=4)
-    print(f"Extracted {len(eval_images)} evaluation samples from shards")
 
-# Create generation callback if we have eval samples
+generation_callback = None
 if eval_images and eval_texts:
     generation_callback = GenerationCallback(
-        processor=processor,
-        model=model,
-        eval_images=eval_images,
-        eval_texts=eval_texts,
-        tokenizer=processor.tokenizer,
-        output_dir="./outputs/runs"
+        processor=processor, model=model,
+        eval_images=eval_images, eval_texts=eval_texts,
+        tokenizer=tokenizer, output_dir="./outputs/runs",
     )
-else:
-    print("Warning: Could not find evaluation samples. Generation callback will be skipped.")
 
+
+# FIX 4: LR restart with constant_with_warmup to escape cosine plateau
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir="./outputs",
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=16,
         num_train_epochs=1000,
         fp16=False,
-        save_steps=500,
-        logging_steps=100,
-        eval_steps=500,
+        save_steps=250,
+        logging_steps=50,
+        eval_steps=250,
         report_to="tensorboard",
         logging_dir="./outputs/runs",
         save_total_limit=2,
         predict_with_generate=True,
+        generation_num_beams=4,
+        generation_max_length=128,
         gradient_accumulation_steps=4,
-        learning_rate=1e-4,
-        lr_scheduler_type="cosine",
-        warmup_steps=100,
+        learning_rate=1e-6,
+        weight_decay=0.01,
+        lr_scheduler_type="constant_with_warmup",
+        warmup_steps=500,
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         eval_strategy="steps",
-        weight_decay=0.001,
         eval_on_start=True,
-        metric_for_best_model="cer",
-        greater_is_better=False,
+        metric_for_best_model="eval_loss",
         ddp_find_unused_parameters=True,
         dataloader_num_workers=12,
         dataloader_persistent_workers=False,
         gradient_checkpointing=True,
         dataloader_prefetch_factor=4,
         dataloader_pin_memory=True,
-        # ddp_backend="gloo",
         deepspeed="ds_config.json",
-        # local_rank=-1,
         hub_model_id=hf_dir,
-        # push_to_hub=True,
+        push_to_hub=True,
     )
 
     trainer = Seq2SeqTrainer(
@@ -664,59 +431,47 @@ if __name__ == "__main__":
         eval_dataset=val_dataset,
         processing_class=processor,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)] + 
-                  ([generation_callback] if generation_callback else [])
+        callbacks=(
+            [EarlyStoppingCallback(early_stopping_patience=10)]
+            + ([generation_callback] if generation_callback else [])
+        ),
     )
-    try:    
-        # Train the model
-        if os.path.exists(training_args.output_dir) and any(f.startswith("checkpoint") for f in os.listdir(training_args.output_dir)):
-            print("Resuming training from checkpoint...")
+
+    try:
+        ckpts = (
+            [f for f in os.listdir(training_args.output_dir) if f.startswith("checkpoint")]
+            if os.path.exists(training_args.output_dir) else []
+        )
+        if ckpts:
+            print("Resuming from checkpoint...")
             trainer.train(resume_from_checkpoint=True)
         else:
-            print("Starting training from scratch...")
+            print("Starting from scratch...")
             trainer.train()
-        print("Training completed")
+        print("Training complete.")
 
     except Exception as e:
         print(f"Training interrupted: {e}")
+        raise
 
     finally:
-        # Start MLflow run
         trainer.push_to_hub()
         with mlflow.start_run():
-            # Log dataset information
-            mlflow.log_param("dataset_path", DATA_DIR)
-            mlflow.log_param("train_size", train_size)
-            mlflow.log_param("val_size", val_size)
-            mlflow.log_param("train_percentage", 0.999)
-            
-            # # Log model information
-            # mlflow.log_param("encoder_model", model_dir)
-            # mlflow.log_param("decoder_model", decoder_dir)
-            # mlflow.log_param("checkpoint_path", ckpt_path)
-            mlflow.log_param("model_name", hf_dir)
-            
-            # Log generation config parameters
-            mlflow.log_param("repetition_penalty", model.generation_config.repetition_penalty)
-            mlflow.log_param("no_repeat_ngram_size", model.generation_config.no_repeat_ngram_size)
-            mlflow.log_param("num_beams", model.generation_config.num_beams)
-            mlflow.log_param("length_penalty", model.generation_config.length_penalty)
-            mlflow.log_param("max_length", model.generation_config.max_length)
-            
-            # Log training hyperparameters
-            mlflow.log_param("per_device_train_batch_size", training_args.per_device_train_batch_size)
-            mlflow.log_param("per_device_eval_batch_size", training_args.per_device_eval_batch_size)
-            mlflow.log_param("num_train_epochs", training_args.num_train_epochs)
-            mlflow.log_param("learning_rate", training_args.learning_rate)
-            mlflow.log_param("lr_scheduler_type", training_args.lr_scheduler_type)
-            mlflow.log_param("warmup_steps", training_args.warmup_steps)
-            mlflow.log_param("weight_decay", training_args.weight_decay)
-            mlflow.log_param("gradient_accumulation_steps", training_args.gradient_accumulation_steps)
-            mlflow.log_param("eval_strategy", training_args.eval_strategy)
-            mlflow.log_param("eval_steps", training_args.eval_steps)
-            mlflow.log_param("save_steps", training_args.save_steps)
-            mlflow.log_param("logging_steps", training_args.logging_steps)
-
-            # Log total trainable parameters
-            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000000
-            mlflow.log_param("total_trainable_parameters_millions", total_params)
+            mlflow.log_params({
+                "decoder_model":     decoder_dir,
+                "dataset_path":      DATA_DIR,
+                "train_size":        train_size,
+                "val_size":          val_size,
+                "model_name":        hf_dir,
+                "lang_code_bn":      LANG_CODE_BN,
+                "lang_code_en":      LANG_CODE_EN,
+                "learning_rate":     training_args.learning_rate,
+                "lr_scheduler":      training_args.lr_scheduler_type,
+                "weight_decay":      training_args.weight_decay,
+                "warmup_steps":      training_args.warmup_steps,
+                "grad_accum":        training_args.gradient_accumulation_steps,
+                "max_target_length": 128,
+                "num_beams":         4,
+                "no_repeat_ngram":   3,
+                "trainable_M":       round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, 2),
+            })
