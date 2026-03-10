@@ -1,16 +1,17 @@
 import os
 os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"]  = "1"
 os.environ["NCCL_SHM_DISABLE"] = "1"
 
+import io
 import jiwer
 import json
-from PIL import Image
-import mlflow
-import mlflow.pytorch
-import tarfile
 import math
+import tarfile
+import unicodedata
 import numpy as np
+
+from PIL import Image
 
 import torch
 from torch.utils.data import Dataset, random_split
@@ -22,149 +23,162 @@ from transformers import (
     TrOCRProcessor,
     VisionEncoderDecoderModel,
     MBartForCausalLM,
-    MBart50Tokenizer,           # slow tokenizer — avoids tiktoken/SentencePiece conversion error
-    GenerationConfig,
+    MBart50Tokenizer,
 )
 from transformers import EarlyStoppingCallback, TrainerCallback
 from datasets import load_dataset
 
+import mlflow
+import mlflow.pytorch
 import pandas as pd
-import unicodedata
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-trocr_dir   = "microsoft/trocr-base-stage1"  # source of pretrained ViT encoder
-decoder_dir = "facebook/mbart-large-50"
-hf_dir      = "kavinh07/nid-ocr-vit-mbart50"
-DATA_DIR    = "kavinh07/synth-200k-ocr"
-TEST_DIR    = "./test_data"
-
+trocr_dir    = "microsoft/trocr-base-stage1"
+decoder_dir  = "facebook/mbart-large-50"
+hf_dir       = "kavinh07/nid-ocr-vit-mbart50-2"
+DATA_DIR     = "kavinh07/synth-200k-ocr"
+TEST_DIR     = "./test_data"
 LANG_CODE_BN = "bn_IN"
 LANG_CODE_EN = "en_XX"
 
+# 128 tokens comfortably covers even the longest NID address fields.
+MAX_TARGET_LENGTH = 128
+
 # ============================================================
-# TOKENIZER
+# LANGUAGE DETECTION
+# Used consistently in both dataset tokenization AND inference.
+# ============================================================
+def is_bangla(text: str) -> bool:
+    bangla = sum(1 for c in text if "\u0980" <= c <= "\u09FF")
+    return (bangla / max(len(text.strip()), 1)) >= 0.3
+
+
+# ============================================================
+# TOKENIZER & PROCESSOR
 # ============================================================
 tokenizer = MBart50Tokenizer.from_pretrained(
     decoder_dir,
     src_lang=LANG_CODE_BN,
     tgt_lang=LANG_CODE_BN,
 )
-
-# TrOCRProcessor = ViT feature extractor + a tokenizer
 processor = TrOCRProcessor.from_pretrained(trocr_dir, tokenizer=tokenizer)
 
 # ============================================================
 # BUILD MODEL
-#
-# WHY NOT from_encoder_decoder_pretrained():
-#   TrOCR is itself a VisionEncoderDecoderModel. Passing it as
-#   the encoder_pretrained_model_name_or_path causes AutoModel
-#   to reject its VisionEncoderDecoderConfig.
-#
-# SOLUTION:
-#   1. Load TrOCR, extract just its ViT encoder.
-#   2. Load mBART-50 as a causal decoder.
-#   3. Pass both to VisionEncoderDecoderModel(encoder=, decoder=).
-#      This constructor detects hidden_size mismatch (768 vs 1024)
-#      and auto-creates enc_to_dec_proj correctly.
+# Cannot use from_encoder_decoder_pretrained(trocr_dir, ...) because
+# TrOCR is itself a VisionEncoderDecoderModel and AutoModel rejects it.
+# Extract ViT from TrOCR, load mBART-50 separately, pass both to
+# VisionEncoderDecoderModel() which auto-creates enc_to_dec_proj
+# (Linear 768->1024).
 # ============================================================
+trocr_base    = VisionEncoderDecoderModel.from_pretrained(trocr_dir)
+vit_encoder   = trocr_base.encoder
+del trocr_base
 
-# Step 1 — extract ViT encoder from TrOCR
-trocr_model = VisionEncoderDecoderModel.from_pretrained(trocr_dir)
-vit_encoder = trocr_model.encoder   # ViT, hidden_size = 768
-del trocr_model                      # free memory immediately
-
-# Step 2 — load mBART-50 decoder
 mbart_decoder = MBartForCausalLM.from_pretrained(
     decoder_dir,
     is_decoder=True,
     add_cross_attention=True,
 )
 
-# Step 3 — assemble model; enc_to_dec_proj (768->1024) created automatically
-model = VisionEncoderDecoderModel(
-    encoder=vit_encoder,
-    decoder=mbart_decoder,
-)
+model = VisionEncoderDecoderModel(encoder=vit_encoder, decoder=mbart_decoder)
 
-# Step 4 — language token IDs
-BN_TOKEN_ID = tokenizer.lang_code_to_id[LANG_CODE_BN]
-EN_TOKEN_ID = tokenizer.lang_code_to_id[LANG_CODE_EN]
+BN_TOKEN_ID = tokenizer.lang_code_to_id[LANG_CODE_BN]   # 250028
+EN_TOKEN_ID = tokenizer.lang_code_to_id[LANG_CODE_EN]   # 250004
 
-# Step 5 — set config on BOTH model.config and model.generation_config
-#           (setting only model.config triggers a deprecation warning in v4.x)
-for cfg in (model.config, model.generation_config):
-    cfg.decoder_start_token_id = BN_TOKEN_ID
-    cfg.forced_bos_token_id    = BN_TOKEN_ID
-    cfg.pad_token_id           = tokenizer.pad_token_id
-    cfg.eos_token_id           = tokenizer.eos_token_id
+# FIX (double BOS): use EOS as a neutral decoder seed.
+# Previously decoder_start_token_id=BN_TOKEN_ID caused a duplicate
+# language token: model seeded with bn_IN, then label also started
+# with bn_IN (prepended by tokenizer). Now:
+#   - Decoder is seeded with </s> (neutral, no language bias)
+#   - Label starts with first real text token (language token stripped)
+#   - At inference, forced_bos_token_id per-sample handles language routing
+model.config.decoder_start_token_id            = tokenizer.eos_token_id
+model.config.pad_token_id                      = tokenizer.pad_token_id
+model.config.eos_token_id                      = tokenizer.eos_token_id
+model.config.vocab_size                        = model.decoder.config.vocab_size
+model.generation_config.decoder_start_token_id = tokenizer.eos_token_id
+model.generation_config.pad_token_id           = tokenizer.pad_token_id
+model.generation_config.eos_token_id           = tokenizer.eos_token_id
+# forced_bos_token_id NOT set globally — applied per-sample at inference
 
-model.config.vocab_size = model.decoder.config.vocab_size
-
-# Sanity check
 print(f"enc_to_dec_proj : {model.enc_to_dec_proj}")
 print(f"Encoder hidden  : {vit_encoder.config.hidden_size}")
 print(f"Decoder hidden  : {mbart_decoder.config.hidden_size}")
 
 # ============================================================
 # GENERATION CONFIG
+# repetition_penalty softly discourages repeat tokens.
+# no_repeat_ngram_size=0: DISABLED — hard-blocks legitimate digit
+#   patterns like 7474398146 (the "74" bigram appears twice).
+# num_beams=4: beam search for better long-sequence decoding.
 # ============================================================
 with open("best_params.json", "r") as f:
     best_params = json.load(f)
 
-model.generation_config.repetition_penalty = best_params.get("repetition_penalty", 1.3)
-model.generation_config.max_length         = 64
-model.generation_config.early_stopping     = True
-model.generation_config.use_cache          = True
+model.generation_config.repetition_penalty   = best_params.get("repetition_penalty", 1.3)
+model.generation_config.no_repeat_ngram_size = 0
+model.generation_config.num_beams            = 4
+model.generation_config.length_penalty       = 1.0
+model.generation_config.max_length           = MAX_TARGET_LENGTH
+model.generation_config.early_stopping       = True
+model.generation_config.use_cache            = True
 
 # ============================================================
-# FREEZE ENCODER  (keep last transformer block trainable)
+# FREEZE STRATEGY
+# Last 3 encoder blocks unfrozen — NID card images are domain-shifted
+# from TrOCR pretraining data, need encoder adaptation.
+# enc_to_dec_proj always trainable (randomly initialised).
+# Full decoder is trainable.
 # ============================================================
 for param in model.encoder.parameters():
     param.requires_grad = False
 
-for param in model.encoder.encoder.layer[-1].parameters():
-    param.requires_grad = True
+for layer in model.encoder.encoder.layer[-3:]:
+    for param in layer.parameters():
+        param.requires_grad = True
 
-# enc_to_dec_proj is randomly initialised — must stay trainable
 for param in model.enc_to_dec_proj.parameters():
     param.requires_grad = True
 
-print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M")
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total     = sum(p.numel() for p in model.parameters())
+print(f"Trainable: {trainable/1e6:.1f}M / {total/1e6:.1f}M total")
 
 
 # ============================================================
-# DATASET UTILITIES
+# DATASET
 # ============================================================
 
-def prepare_sharded_dataset(data_source, shard_dir="shards", samples_per_shard=2000, max_shards=None):
+def prepare_sharded_dataset(
+    data_source, shard_dir="shards", samples_per_shard=2000, max_shards=None
+):
     os.makedirs(shard_dir, exist_ok=True)
-    existing_shards = sorted([f for f in os.listdir(shard_dir) if f.endswith(".tar")])
+    existing = sorted(f for f in os.listdir(shard_dir) if f.endswith(".tar"))
 
-    if existing_shards:
-        shards = existing_shards[:max_shards] if max_shards else existing_shards
-        print(f"Using {len(shards)} existing shards")
+    if existing:
+        use = existing[:max_shards] if max_shards else existing
+        print(f"Using {len(use)} existing shards")
         return shard_dir
 
     if os.path.isdir(data_source):
         import shutil
-        source_shards = sorted([f for f in os.listdir(data_source) if f.endswith(".tar")])
-        if source_shards:
+        srcs = sorted(f for f in os.listdir(data_source) if f.endswith(".tar"))
+        if srcs:
             if max_shards:
-                source_shards = source_shards[:max_shards]
-            for sf in source_shards:
-                src = os.path.join(data_source, sf)
+                srcs = srcs[:max_shards]
+            for sf in srcs:
                 dst = os.path.join(shard_dir, sf)
                 if not os.path.exists(dst):
-                    shutil.copy2(src, dst)
-            print(f"Loaded {len(source_shards)} shards from {data_source}")
+                    shutil.copy2(os.path.join(data_source, sf), dst)
+            print(f"Copied {len(srcs)} shards from {data_source}")
             return shard_dir
 
-    print(f"Downloading dataset: {data_source} ...")
+    print(f"Downloading: {data_source} ...")
     dataset     = load_dataset(data_source, split="train")
     num_samples = len(dataset)
     num_shards  = math.ceil(num_samples / samples_per_shard)
@@ -174,8 +188,7 @@ def prepare_sharded_dataset(data_source, shard_dir="shards", samples_per_shard=2
         dataset     = dataset.select(range(min(num_shards * samples_per_shard, len(dataset))))
         num_samples = len(dataset)
 
-    import io
-    print(f"Creating {num_shards} shards ...")
+    print(f"Creating {num_shards} shards from {num_samples} samples ...")
     for shard_id in range(num_shards):
         start         = shard_id * samples_per_shard
         end           = min(start + samples_per_shard, num_samples)
@@ -184,42 +197,40 @@ def prepare_sharded_dataset(data_source, shard_dir="shards", samples_per_shard=2
 
         with tarfile.open(shard_path, "w") as tar:
             for idx, sample in enumerate(shard_dataset):
-                image = sample["jpg"]
-                text  = sample["txt"]
-
                 img_buf = io.BytesIO()
-                image.save(img_buf, format="PNG")
+                sample["jpg"].save(img_buf, format="PNG")
                 img_data = img_buf.getvalue()
 
-                ti      = tarfile.TarInfo(name=f"sample_{start+idx:06d}.png")
+                ti = tarfile.TarInfo(name=f"sample_{start+idx:06d}.png")
                 ti.size = len(img_data)
                 tar.addfile(ti, io.BytesIO(img_data))
 
-                tb      = text.encode("utf-8")
-                tt      = tarfile.TarInfo(name=f"sample_{start+idx:06d}.txt")
+                tb = sample["txt"].encode("utf-8")
+                tt = tarfile.TarInfo(name=f"sample_{start+idx:06d}.txt")
                 tt.size = len(tb)
                 tar.addfile(tt, io.BytesIO(tb))
 
         if (shard_id + 1) % max(1, num_shards // 10) == 0:
-            print(f"  {shard_id+1}/{num_shards} shards done")
+            print(f"  {shard_id+1}/{num_shards} shards")
 
     return shard_dir
 
 
 class ShardedOCRDataset(Dataset):
-    def __init__(self, shard_dir, processor, max_target_length=64, max_samples=None):
+    def __init__(self, shard_dir, processor, max_target_length=128, max_samples=None):
         self.processor         = processor
         self.tokenizer         = processor.tokenizer
         self.max_target_length = max_target_length
         self.samples           = []
 
-        shard_files = sorted([f for f in os.listdir(shard_dir) if f.endswith(".tar")])
+        shard_files = sorted(f for f in os.listdir(shard_dir) if f.endswith(".tar"))
         for sf in shard_files:
             with tarfile.open(os.path.join(shard_dir, sf), "r") as tar:
-                for member in tar.getmembers():
-                    if member.name.endswith((".jpg", ".png")):
-                        base = member.name.rsplit(".", 1)[0]
-                        self.samples.append((os.path.join(shard_dir, sf), base))
+                for m in tar.getmembers():
+                    if m.name.endswith((".jpg", ".png")):
+                        self.samples.append(
+                            (os.path.join(shard_dir, sf), m.name.rsplit(".", 1)[0])
+                        )
                         if max_samples and len(self.samples) >= max_samples:
                             break
             if max_samples and len(self.samples) >= max_samples:
@@ -228,7 +239,7 @@ class ShardedOCRDataset(Dataset):
         if max_samples:
             self.samples = self.samples[:max_samples]
 
-        print(f"Loaded {len(self.samples)} samples from {len(shard_files)} shards")
+        print(f"Dataset: {len(self.samples):,} samples from {len(shard_files)} shards")
 
     def __len__(self):
         return len(self.samples)
@@ -240,7 +251,9 @@ class ShardedOCRDataset(Dataset):
             image = None
             for ext in (".jpg", ".png"):
                 try:
-                    image = Image.open(tar.extractfile(tar.getmember(f"{base}{ext}"))).convert("RGB")
+                    image = Image.open(
+                        tar.extractfile(tar.getmember(f"{base}{ext}"))
+                    ).convert("RGB")
                     break
                 except KeyError:
                     continue
@@ -251,7 +264,14 @@ class ShardedOCRDataset(Dataset):
                 tar.getmember(f"{base}.txt")
             ).read().decode("utf-8").strip()
 
-        text         = unicodedata.normalize("NFKC", text)
+        text = unicodedata.normalize("NFKC", text)
+
+        # FIX 1: set src_lang AND tgt_lang per-sample so mBART prepends
+        # the correct language token for this label's actual language.
+        lang = LANG_CODE_BN if is_bangla(text) else LANG_CODE_EN
+        self.tokenizer.src_lang = lang
+        self.tokenizer.tgt_lang = lang
+
         pixel_values = self.processor(image, return_tensors="pt")["pixel_values"].squeeze()
 
         tokenized = self.tokenizer(
@@ -263,6 +283,20 @@ class ShardedOCRDataset(Dataset):
         )
 
         labels = tokenized.input_ids.squeeze()
+
+        # FIX 2: strip the leading language token (bn_IN=250028 or en_XX=250004).
+        # mBART tokenizer prepends src_lang as labels[0]. We remove it because
+        # decoder_start_token_id (EOS, neutral seed) already handles decoder
+        # initialisation. Keeping it caused a double BOS:
+        #   [bn_IN(seed), bn_IN(from label), text...]  <- wrong
+        # After fix:
+        #   [</s>(seed),  text_token_1, text_token_2, ...]  <- correct
+        # Shift left by 1, pad tail to preserve max_target_length.
+        labels = torch.cat([
+            labels[1:],
+            torch.tensor([self.tokenizer.pad_token_id])
+        ])
+
         labels[labels == self.tokenizer.pad_token_id] = -100
 
         return {"pixel_values": pixel_values, "labels": labels}
@@ -270,6 +304,7 @@ class ShardedOCRDataset(Dataset):
 
 # ============================================================
 # DATA SETUP
+# 400k samples, 99/1 split -> ~4,000 val samples for stable CER.
 # ============================================================
 TEST_MODE   = False
 MAX_SHARDS  = None
@@ -285,14 +320,17 @@ shard_dir = prepare_sharded_dataset(
 data = ShardedOCRDataset(
     shard_dir=shard_dir,
     processor=processor,
-    max_target_length=64,
+    max_target_length=MAX_TARGET_LENGTH,
     max_samples=MAX_SAMPLES if TEST_MODE else None,
 )
 
 train_size = int(0.99 * len(data))
 val_size   = len(data) - train_size
-train_dataset, val_dataset = random_split(data, [train_size, val_size])
-print(f"Train: {train_size}  Val: {val_size}")
+train_dataset, val_dataset = random_split(
+    data, [train_size, val_size],
+    generator=torch.Generator().manual_seed(42),
+)
+print(f"Train: {train_size:,}  Val: {val_size:,}")
 
 
 # ============================================================
@@ -305,8 +343,8 @@ def compute_metrics(pred):
     pred_ids[pred_ids == -100]   = tokenizer.pad_token_id
     label_ids[label_ids == -100] = tokenizer.pad_token_id
 
-    pred_str  = tokenizer.batch_decode(pred_ids,  skip_special_tokens=True)
-    label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+    pred_str  = [s.strip() for s in tokenizer.batch_decode(pred_ids,  skip_special_tokens=True)]
+    label_str = [s.strip() for s in tokenizer.batch_decode(label_ids, skip_special_tokens=True)]
 
     return {
         "cer": jiwer.cer(label_str, pred_str),
@@ -316,9 +354,13 @@ def compute_metrics(pred):
 
 # ============================================================
 # GENERATION CALLBACK
+# Per-sample forced_bos_token_id and matching src/tgt_lang.
 # ============================================================
 class GenerationCallback(TrainerCallback):
-    def __init__(self, processor, model, eval_images, eval_texts, tokenizer, output_dir="./outputs/runs"):
+    def __init__(
+        self, processor, model, eval_images, eval_texts,
+        tokenizer, output_dir="./outputs/runs"
+    ):
         self.processor   = processor
         self.model       = model
         self.eval_images = eval_images
@@ -336,55 +378,77 @@ class GenerationCallback(TrainerCallback):
         if self.writer is None:
             self.writer = SummaryWriter(log_dir=self.output_dir)
 
-        repetition_count, total_len = 0, 0
-        text_summary = f"## Generation Test - Step {step}\n\n"
+        rep_count, total_len = 0, 0
+        summary = f"## Generation Test — Step {step}
+
+"
         self.model.eval()
 
         for i, (img_path, txt_path) in enumerate(zip(self.eval_images, self.eval_texts)):
             pil   = Image.open(img_path).convert("RGB")
             pv    = self.processor(images=pil, return_tensors="pt").pixel_values.to(self.model.device)
-            truth = open(txt_path, encoding="utf-8").read()
+            truth = open(txt_path, encoding="utf-8").read().strip()
+
+            # Per-sample language routing — matches training tokenization
+            lang      = LANG_CODE_BN if is_bangla(truth) else LANG_CODE_EN
+            lang_bos  = BN_TOKEN_ID  if is_bangla(truth) else EN_TOKEN_ID
+            self.tokenizer.src_lang = lang
+            self.tokenizer.tgt_lang = lang
 
             with torch.no_grad():
                 outs = self.model.generate(
                     pv,
-                    forced_bos_token_id=BN_TOKEN_ID,
+                    forced_bos_token_id=lang_bos,   # single language token, no duplicate
+                    num_beams=4,
+                    no_repeat_ngram_size=0,
+                    max_length=MAX_TARGET_LENGTH,
                     output_hidden_states=True,
                     return_dict_in_generate=True,
                 )
 
-            hm = self.encoder_heatmap(outs.encoder_hidden_states[-1])
+            # Encoder attention heatmap
+            hm    = self.encoder_heatmap(outs.encoder_hidden_states[-1])
             hm_up = torch.nn.functional.interpolate(
                 torch.tensor(hm).unsqueeze(0).unsqueeze(0),
                 size=(pil.height, pil.width), mode="bilinear", align_corners=False
             )[0, 0].numpy()
 
             if self.writer:
-                img_np = np.array(pil).astype(np.float32) / 255.0
-                h_min, h_max = hm_up.min(), hm_up.max()
-                h_norm = (hm_up - h_min) / (h_max - h_min + 1e-8)
+                img_np   = np.array(pil).astype(np.float32) / 255.0
+                h_norm   = (hm_up - hm_up.min()) / (hm_up.max() - hm_up.min() + 1e-8)
                 import matplotlib.cm as cm
                 hm_color = cm.get_cmap("viridis")(h_norm)[:, :, :3].astype(np.float32)
                 overlay  = img_np * 0.5 + hm_color * 0.5
                 self.writer.add_image(f"gen/overlay_{i+1}", np.transpose(overlay, (2,0,1)), step)
                 self.writer.add_image(f"gen/image_{i+1}",   np.transpose(img_np,  (2,0,1)), step)
 
-            gen_text = self.tokenizer.decode(outs.sequences[0], skip_special_tokens=True)
+            gen_text = self.tokenizer.decode(outs.sequences[0], skip_special_tokens=True).strip()
             tokens   = outs.sequences[0].tolist()
             total_len += len(tokens)
 
-            text_summary += f"### Sample {i+1}\n**GT:** {truth}\n\n**Pred:** {gen_text}\n\n"
+            summary += f"### Sample {i+1} [{lang}]
+"
+            summary += f"**GT:**   {truth}
+
+"
+            summary += f"**Pred:** {gen_text}
+
+"
+
             if len(tokens) > 3 and len(set(tokens[1:-1])) == 1:
-                repetition_count += 1
-                text_summary += "⚠️ REPETITION DETECTED\n\n"
+                rep_count += 1
+                summary += "WARNING: REPETITION DETECTED
+
+"
 
         n    = max(len(self.eval_images), 1)
         avg  = total_len / n
-        rate = repetition_count / n * 100
+        rate = rep_count / n * 100
 
-        text_summary += f"**Repetitions:** {repetition_count}/{n}  **Rate:** {rate:.1f}%  **Avg len:** {avg:.1f}\n"
+        summary += f"**Repetitions:** {rep_count}/{n}  **Rate:** {rate:.1f}%  **Avg len:** {avg:.1f}
+"
         if self.writer:
-            self.writer.add_text("gen/samples", text_summary, step)
+            self.writer.add_text("gen/samples", summary, step)
             self.writer.flush()
 
         metrics = {"gen/repetition_rate": rate, "gen/avg_length": avg}
@@ -399,7 +463,7 @@ class GenerationCallback(TrainerCallback):
 # ============================================================
 # EVAL SAMPLE EXTRACTION
 # ============================================================
-def extract_eval_samples_from_shards(shard_dir, num_samples=4):
+def extract_eval_samples_from_shards(shard_dir, num_samples=7):
     import tempfile
     eval_dir = tempfile.mkdtemp(prefix="eval_")
     imgs, txts, count = [], [], 0
@@ -416,21 +480,17 @@ def extract_eval_samples_from_shards(shard_dir, num_samples=4):
                     txt_m = tar.getmember(f"{base}.txt")
                 except KeyError:
                     continue
-
                 ip = os.path.join(eval_dir, f"{base}.png")
                 with open(ip, "wb") as f:
                     f.write(tar.extractfile(m).read())
-
                 tp = os.path.join(eval_dir, f"{base}.txt")
                 with open(tp, "w", encoding="utf-8") as f:
                     f.write(tar.extractfile(txt_m).read().decode("utf-8"))
-
                 imgs.append(ip)
                 txts.append(tp)
                 count += 1
                 if count >= num_samples:
                     break
-
     return imgs, txts
 
 
@@ -452,7 +512,7 @@ if os.path.isdir(TEST_DIR):
     ]
 else:
     print("Extracting eval samples from shards...")
-    eval_images, eval_texts = extract_eval_samples_from_shards(shard_dir, num_samples=4)
+    eval_images, eval_texts = extract_eval_samples_from_shards(shard_dir, num_samples=7)
 
 generation_callback = None
 if eval_images and eval_texts:
@@ -478,18 +538,21 @@ if __name__ == "__main__":
         eval_steps=500,
         report_to="tensorboard",
         logging_dir="./outputs/runs",
-        save_total_limit=2,
+        save_total_limit=3,
         predict_with_generate=True,
+        generation_num_beams=4,
+        generation_max_length=MAX_TARGET_LENGTH,
         gradient_accumulation_steps=4,
-        learning_rate=3e-6,
+        learning_rate=5e-5,
         weight_decay=0.01,
         lr_scheduler_type="cosine",
-        warmup_steps=1000,
+        warmup_steps=2000,
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         eval_strategy="steps",
         eval_on_start=True,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model="eval_cer",
+        greater_is_better=False,
         ddp_find_unused_parameters=True,
         dataloader_num_workers=12,
         dataloader_persistent_workers=False,
@@ -509,14 +572,16 @@ if __name__ == "__main__":
         processing_class=processor,
         compute_metrics=compute_metrics,
         callbacks=(
-            [EarlyStoppingCallback(early_stopping_patience=10)]
+            [EarlyStoppingCallback(early_stopping_patience=20)]
             + ([generation_callback] if generation_callback else [])
         ),
     )
 
     try:
-        ckpts = [f for f in os.listdir(training_args.output_dir) if f.startswith("checkpoint")] \
-                if os.path.exists(training_args.output_dir) else []
+        ckpts = (
+            [f for f in os.listdir(training_args.output_dir) if f.startswith("checkpoint")]
+            if os.path.exists(training_args.output_dir) else []
+        )
         if ckpts:
             print("Resuming from checkpoint...")
             trainer.train(resume_from_checkpoint=True)
@@ -533,16 +598,23 @@ if __name__ == "__main__":
         trainer.push_to_hub()
         with mlflow.start_run():
             mlflow.log_params({
-                "decoder_model": decoder_dir,
-                "dataset_path":  DATA_DIR,
-                "train_size":    train_size,
-                "val_size":      val_size,
-                "model_name":    hf_dir,
-                "lang_code_bn":  LANG_CODE_BN,
-                "lang_code_en":  LANG_CODE_EN,
-                "learning_rate": training_args.learning_rate,
-                "weight_decay":  training_args.weight_decay,
-                "warmup_steps":  training_args.warmup_steps,
-                "grad_accum":    training_args.gradient_accumulation_steps,
-                "trainable_M":   round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, 2),
+                "decoder_model":          decoder_dir,
+                "dataset_path":           DATA_DIR,
+                "train_size":             train_size,
+                "val_size":               val_size,
+                "model_name":             hf_dir,
+                "lang_code_bn":           LANG_CODE_BN,
+                "lang_code_en":           LANG_CODE_EN,
+                "learning_rate":          training_args.learning_rate,
+                "lr_scheduler":           training_args.lr_scheduler_type,
+                "weight_decay":           training_args.weight_decay,
+                "warmup_steps":           training_args.warmup_steps,
+                "grad_accum":             training_args.gradient_accumulation_steps,
+                "max_target_length":      MAX_TARGET_LENGTH,
+                "num_beams":              4,
+                "encoder_layers_unfrozen":3,
+                "decoder_start_token":    "eos (neutral)",
+                "trainable_M":            round(
+                    sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, 2
+                ),
             })
