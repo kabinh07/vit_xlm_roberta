@@ -324,7 +324,7 @@ data = ShardedOCRDataset(
     max_samples=MAX_SAMPLES if TEST_MODE else None,
 )
 
-train_size = int(0.99 * len(data))
+train_size = int(0.999 * len(data))
 val_size   = len(data) - train_size
 train_dataset, val_dataset = random_split(
     data, [train_size, val_size],
@@ -379,9 +379,7 @@ class GenerationCallback(TrainerCallback):
             self.writer = SummaryWriter(log_dir=self.output_dir)
 
         rep_count, total_len = 0, 0
-        summary = f"## Generation Test — Step {step}
-
-"
+        summary = f"## Generation Test — Step {step}"
         self.model.eval()
 
         for i, (img_path, txt_path) in enumerate(zip(self.eval_images, self.eval_texts)):
@@ -423,30 +421,25 @@ class GenerationCallback(TrainerCallback):
                 self.writer.add_image(f"gen/image_{i+1}",   np.transpose(img_np,  (2,0,1)), step)
 
             gen_text = self.tokenizer.decode(outs.sequences[0], skip_special_tokens=True).strip()
+            gen_ids = self.tokenizer.convert_ids_to_tokens(outs.sequences[0])
             tokens   = outs.sequences[0].tolist()
             total_len += len(tokens)
 
-            summary += f"### Sample {i+1} [{lang}]
-"
-            summary += f"**GT:**   {truth}
-
-"
-            summary += f"**Pred:** {gen_text}
-
-"
+            summary += f"### Sample {i+1} [{lang}]\n"
+            summary += f"**GT:**   {truth}\n"
+            summary += f"**GT Tokens:** {' '.join(self.tokenizer.convert_ids_to_tokens(tokens))}\n"
+            summary += f"**Pred:** {gen_text}\n"
+            summary += f"**Pred Tokens:** {' '.join(gen_ids)}\n"
 
             if len(tokens) > 3 and len(set(tokens[1:-1])) == 1:
                 rep_count += 1
-                summary += "WARNING: REPETITION DETECTED
-
-"
+                summary += "WARNING: REPETITION DETECTED\n"
 
         n    = max(len(self.eval_images), 1)
         avg  = total_len / n
         rate = rep_count / n * 100
 
-        summary += f"**Repetitions:** {rep_count}/{n}  **Rate:** {rate:.1f}%  **Avg len:** {avg:.1f}
-"
+        summary += f"**Repetitions:** {rep_count}/{n}  **Rate:** {rate:.1f}%  **Avg len:** {avg:.1f}\n"
         if self.writer:
             self.writer.add_text("gen/samples", summary, step)
             self.writer.flush()
@@ -529,8 +522,8 @@ if eval_images and eval_texts:
 if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir="./outputs",
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=32,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=16,
         num_train_epochs=1000,
         fp16=False,
         save_steps=500,
@@ -538,11 +531,11 @@ if __name__ == "__main__":
         eval_steps=500,
         report_to="tensorboard",
         logging_dir="./outputs/runs",
-        save_total_limit=3,
+        save_total_limit=2,
         predict_with_generate=True,
         generation_num_beams=4,
         generation_max_length=MAX_TARGET_LENGTH,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=2,
         learning_rate=5e-5,
         weight_decay=0.01,
         lr_scheduler_type="cosine",
@@ -554,14 +547,15 @@ if __name__ == "__main__":
         metric_for_best_model="eval_cer",
         greater_is_better=False,
         ddp_find_unused_parameters=True,
-        dataloader_num_workers=12,
-        dataloader_persistent_workers=False,
-        gradient_checkpointing=True,
-        dataloader_prefetch_factor=4,
-        dataloader_pin_memory=True,
-        deepspeed="ds_config.json",
+        # dataloader_num_workers=12,
+        # dataloader_persistent_workers=False,
+        # gradient_checkpointing=True,
+        # dataloader_prefetch_factor=4,
+        # dataloader_pin_memory=True,
+        # deepspeed="ds_config.json",
         hub_model_id=hf_dir,
         push_to_hub=True,
+        ddp_backend="gloo"
     )
 
     trainer = Seq2SeqTrainer(
